@@ -1,0 +1,142 @@
+{
+  "3202": {
+    "camid": 3202,
+    "userid": 4,
+    "org_id": 4,
+    "region_name": "us-east-1",
+    "number_of_queues": 2,
+    "max_length_allowed": 1,
+    "max_waiting_time_queue": 2,
+    "max_waiting_time_front_person": 1,
+    "queues_coordinates": [
+      {
+        "queue_id": 1,
+        "name": "Queue 1",
+        "rect": {
+          "x": 0.117,
+          "y": 0.37,
+          "w": 0.209,
+          "h": 0.07
+        }
+      },
+      {
+        "queue_id": 2,
+        "name": "Queue 2",
+        "rect": {
+          "x": 0.413,
+          "y": 0.347,
+          "w": 0.069,
+          "h": 0.313
+        }
+      }
+    ],
+    "created_at": "2025-11-24 05:56:59.258320+00:00",
+    "updated_at": "2025-11-24 05:56:59.258320+00:00",
+    "fetched_at": "2025-11-24T11:27:10.310138"
+  },
+  "24": {
+    "camid": 24,
+    "userid": 4,
+    "org_id": 4,
+    "region_name": "us-east-1",
+    "number_of_queues": 2,
+    "max_length_allowed": 4,
+    "max_waiting_time_queue": 2,
+    "max_waiting_time_front_person": 1,
+    "queues_coordinates": [
+      {
+        "queue_id": 1,
+        "name": "Queue 1",
+        "rect": {
+          "x": 0.037,
+          "y": 0.019,
+          "w": 0.526,
+          "h": 0.61
+        }
+      },
+      {
+        "queue_id": 2,
+        "name": "Queue 2",
+        "rect": {
+          "x": 0.541,
+          "y": 0.636,
+          "w": 0.42,
+          "h": 0.342
+        }
+      }
+    ],
+    "created_at": "2025-11-24 06:10:13.846274+00:00",
+    "updated_at": "2025-11-24 06:10:13.846274+00:00",
+    "fetched_at": "2025-11-24T11:40:23.561405"
+  },
+  "400": {
+    "camid": 400,
+    "userid": 4,
+    "org_id": 4,
+    "region_name": "us-east-1",
+    "number_of_queues": 2,
+    "max_length_allowed": 4,
+    "max_waiting_time_queue": 2,
+    "max_waiting_time_front_person": 1,
+    "queues_coordinates": [
+      {
+        "queue_id": 1,
+        "name": "Queue 1",
+        "rect": {
+          "x": 0.29,
+          "y": 0.119,
+          "w": 0.394,
+          "h": 0.443
+        }
+      },
+      {
+        "queue_id": 2,
+        "name": "Queue 2",
+        "rect": {
+          "x": 0.714,
+          "y": 0.142,
+          "w": 0.234,
+          "h": 0.479
+        }
+      }
+    ],
+    "created_at": "2025-11-24 07:39:45.287888+00:00",
+    "updated_at": "2025-11-24 07:39:45.287888+00:00",
+    "fetched_at": "2025-11-24T13:10:02.085014"
+  },
+  "1051": {
+    "camid": 1051,
+    "userid": 4,
+    "org_id": 4,
+    "region_name": "us-east-1",
+    "number_of_queues": 2,
+    "max_length_allowed": 4,
+    "max_waiting_time_queue": 2,
+    "max_waiting_time_front_person": 1,
+    "queues_coordinates": [
+      {
+        "queue_id": 1,
+        "name": "Queue 1",
+        "rect": {
+          "x": 0.35,
+          "y": 0.129,
+          "w": 0.275,
+          "h": 0.304
+        }
+      },
+      {
+        "queue_id": 2,
+        "name": "Queue 2",
+        "rect": {
+          "x": 0.734,
+          "y": 0.197,
+          "w": 0.18,
+          "h": 0.326
+        }
+      }
+    ],
+    "created_at": "2025-11-24 12:04:02.581419+00:00",
+    "updated_at": "2025-11-24 12:04:02.581419+00:00",
+    "fetched_at": "2025-11-24T17:34:13.846635"
+  }
+}

@@ -1,0 +1,10 @@
+test_videos
+__pycache__
+__pycache__/app.cpython-312.pyc
+__pycache__/main.cpython-312.pyc
+qvenv
+sample_videos
+research
+track_outputs
+Dockerfile2
+test_kvs.py
