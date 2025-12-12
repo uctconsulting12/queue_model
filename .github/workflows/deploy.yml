@@ -16,11 +16,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "---- Setting AWS environment ----"
-            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            export AWS_DEFAULT_REGION=${{ secrets.AWS_REGION }}
-
+            
             echo "---- Pulling latest code ----"
 
             # Clone or update repo in ~/queue_model
@@ -33,7 +29,7 @@ jobs:
 
             echo "---- Building Docker image ----"
             cd ~/queue_model
-            sudo docker build -t qeue_image .
+            sudo docker build -t queue_image .
             echo "--- remove none images ------"
             sudo docker image prune -f
 
@@ -46,7 +42,7 @@ jobs:
             --name queue_container \
             -p 8001:8001 \
             --gpus all \
-            -v "$HOME/.aws:/root/.aws"
+            -v /home/ubuntu/.aws:/root/.aws \
             queue_image
 
             echo "Deployment completed. "

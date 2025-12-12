@@ -1,6 +1,5 @@
-# queue_monitoring.py
 """
-Queue monitoring core - same logic as AWS version
+Queue monitoring core - Enhanced with alert debouncing
 Person detection, tracking, queue assignment, wait time calculation
 """
 
@@ -104,7 +103,7 @@ class SimplePersonTracker:
 
 
 class QueueMonitoringSystem:
-    """Queue monitoring system - same as AWS version"""
+    """Queue monitoring system with alert debouncing"""
     
     def __init__(self, model, camera_config: Dict[str, Any]):
         self.model = model
@@ -119,6 +118,10 @@ class QueueMonitoringSystem:
         self.tracker = SimplePersonTracker()
         self.entry_counters = {q["queue_id"]: 0 for q in self.queues}
         self.exit_counters = {q["queue_id"]: 0 for q in self.queues}
+        
+        # NEW: Alert debouncing - tracks if alert is currently active for each queue
+        self.queue_alert_active = {q["queue_id"]: False for q in self.queues}
+        
         self.frame_count = 0
         
         logger.info(f"Initialized QueueMonitoringSystem for camera {self.camid} with {len(self.queues)} queues")
@@ -140,7 +143,7 @@ class QueueMonitoringSystem:
         return None
     
     def process_frame(self, frame: np.ndarray, return_annotated: bool = True) -> Dict[str, Any]:
-        """Process frame - same as AWS version"""
+        """Process frame with alert debouncing"""
         start_time = time.time()
         self.frame_count += 1
         current_time = datetime.now()
@@ -148,7 +151,7 @@ class QueueMonitoringSystem:
         
         # YOLO detection
         try:
-            results = self.model(frame, batch=16, verbose=False)
+            results = self.model(frame, verbose=False)
             detections = []
             
             for result in results:
@@ -194,7 +197,7 @@ class QueueMonitoringSystem:
                     'bbox': person['bbox']
                 })
         
-        # Calculate queue stats
+        # Calculate queue stats with alert debouncing
         queue_stats = self._calculate_queue_stats(queue_assignments)
         
         # Create annotated frame
@@ -206,7 +209,7 @@ class QueueMonitoringSystem:
         
         processing_time = time.time() - start_time
         
-        # Build result
+        # Build result - NOW INCLUDES Should_Alert field
         result = {
             "Frame_Id": str(int(time.time() * 1000)),
             "Time_stamp": timestamp,
@@ -216,6 +219,7 @@ class QueueMonitoringSystem:
             "Front_person_Wt": queue_stats['front_wait_times'],
             "Average_wt_time": queue_stats['avg_wait_times'],
             "Status": queue_stats['statuses'],
+            "Should_Alert": queue_stats['should_alert'],  # NEW: Alert debouncing flag
             "Total_people_detected": len(tracked_persons),
             "People_ids": person_data['ids'],
             "Queue_Assignment": person_data['queue_ids'],
@@ -236,54 +240,73 @@ class QueueMonitoringSystem:
         return result
 
     def _calculate_queue_stats(self, queue_assignments: Dict[int, List]) -> Dict[str, List]:
-        """Calculate queue statistics"""
+        """Calculate queue statistics with alert debouncing
+        
+        Returns actual status AND whether a new alert should be triggered.
+        Alert is only triggered once when problem first detected, and resets when resolved.
+        """
         lengths = []
         front_wait_times = []
         avg_wait_times = []
-        statuses = []     # ["queue to long ",false]
-             # {"queue_id":123,alrt}
+        statuses = []
+        alert_states = []  # NEW: Tracks if new alert should be sent
+        
         for queue in self.queues:
             queue_id = queue['queue_id']
             persons = queue_assignments.get(queue_id, [])
             length = len(persons)
             lengths.append(length)
-            alert=True
-
-
+            
             if length == 0:
+                # Queue is empty - reset everything
                 front_wait_times.append(0.0)
                 avg_wait_times.append(0.0)
                 statuses.append("OK")
+                alert_states.append(False)
+                self.queue_alert_active[queue_id] = False  # Reset alert state
             else:
+                # Calculate wait times
                 persons_sorted = sorted(persons, key=lambda p: p['bbox'][1])
                 front_person = persons_sorted[0]
                 front_wait = front_person['wait_time']
                 front_wait_times.append(round(front_wait, 2))
-
+                
                 avg_wait = sum(p['wait_time'] for p in persons) / length
                 avg_wait_times.append(round(avg_wait, 2))
-
-                if length > self.max_length and alert:
-                    statuses.append("QUEUE_TOO_LONG")
-                    alert=False
-
-                elif front_wait > (self.max_front_wait / 60.0) and alert:
-                    statuses.append("FRONT_WAIT_EXCEEDED")
-                    self.alert=False
-                elif avg_wait > (self.max_queue_wait / 60.0) and self.alert:
-                    statuses.append("AVG_WAIT_EXCEEDED")
-                    self.alert=False
+                
+                # Determine ACTUAL status (always reflects current reality)
+                if length > self.max_length:
+                    actual_status = "QUEUE_TOO_LONG"
+                elif front_wait > (self.max_front_wait / 60.0):
+                    actual_status = "FRONT_WAIT_EXCEEDED"
+                elif avg_wait > (self.max_queue_wait / 60.0):
+                    actual_status = "AVG_WAIT_EXCEEDED"
                 else:
-                    statuses.append("OK")
-
-                if (length < self.max_length  or front_wait > (self.max_front_wait / 60.0) or avg_wait > (self.max_queue_wait / 60.0)) and not self.alert:
-                    self.alert=True
-
+                    actual_status = "OK"
+                
+                statuses.append(actual_status)
+                
+                # Determine if NEW alert should be triggered
+                should_alert = False
+                
+                if actual_status != "OK" and not self.queue_alert_active[queue_id]:
+                    # Problem detected AND no active alert - TRIGGER NEW ALERT
+                    should_alert = True
+                    self.queue_alert_active[queue_id] = True
+                    logger.info(f"Alert triggered for Queue {queue_id}: {actual_status}")
+                elif actual_status == "OK" and self.queue_alert_active[queue_id]:
+                    # Problem resolved - RESET alert state
+                    self.queue_alert_active[queue_id] = False
+                    logger.info(f"Alert cleared for Queue {queue_id}")
+                
+                alert_states.append(should_alert)
+        
         return {
             'lengths': lengths,
             'front_wait_times': front_wait_times,
             'avg_wait_times': avg_wait_times,
-            'statuses': statuses
+            'statuses': statuses,  # Always reflects actual current status
+            'should_alert': alert_states  # Only True when NEW alert should be sent
         }
 
     def _create_annotated_frame(self, frame: np.ndarray, tracked_persons: List,
@@ -526,11 +549,13 @@ class QueueMonitoringSystem:
             return frame.copy()
 
     def get_system_stats(self) -> Dict[str, Any]:
+        """Get system statistics including alert states"""
         return {
             "camera_id": self.camid,
             "frames_processed": self.frame_count,
             "queues_configured": len(self.queues),
             "tracker_stats": self.tracker.get_stats(),
             "entry_counters": self.entry_counters,
-            "exit_counters": self.exit_counters
+            "exit_counters": self.exit_counters,
+            "alert_states": self.queue_alert_active  # NEW: Show which queues have active alerts
         }

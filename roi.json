@@ -138,5 +138,75 @@
     "created_at": "2025-11-24 12:04:02.581419+00:00",
     "updated_at": "2025-11-24 12:04:02.581419+00:00",
     "fetched_at": "2025-11-24T17:34:13.846635"
+  },
+  "1532": {
+    "camid": 1532,
+    "userid": 4,
+    "org_id": 4,
+    "region_name": "us-east-1",
+    "number_of_queues": 2,
+    "max_length_allowed": 1,
+    "max_waiting_time_queue": 1,
+    "max_waiting_time_front_person": 1,
+    "queues_coordinates": [
+      {
+        "queue_id": 1,
+        "name": "Queue 1",
+        "rect": {
+          "x": 0.413,
+          "y": 0.026,
+          "w": 0.231,
+          "h": 0.597
+        }
+      },
+      {
+        "queue_id": 2,
+        "name": "Queue 2",
+        "rect": {
+          "x": 0.699,
+          "y": 0.051,
+          "w": 0.222,
+          "h": 0.719
+        }
+      }
+    ],
+    "created_at": "2025-12-11 10:55:35.253500+00:00",
+    "updated_at": "2025-12-11 10:55:35.253500+00:00",
+    "fetched_at": "2025-12-11T16:25:54.602357"
+  },
+  "1213": {
+    "camid": 1213,
+    "userid": 4,
+    "org_id": 4,
+    "region_name": "us-east-1",
+    "number_of_queues": 2,
+    "max_length_allowed": 4,
+    "max_waiting_time_queue": 2,
+    "max_waiting_time_front_person": 1,
+    "queues_coordinates": [
+      {
+        "queue_id": 1,
+        "name": "Queue 1",
+        "rect": {
+          "x": 0.37,
+          "y": 0.04,
+          "w": 0.302,
+          "h": 0.519
+        }
+      },
+      {
+        "queue_id": 2,
+        "name": "Queue 2",
+        "rect": {
+          "x": 0.712,
+          "y": 0.036,
+          "w": 0.24,
+          "h": 0.639
+        }
+      }
+    ],
+    "created_at": "2025-12-11 11:53:02.402181+00:00",
+    "updated_at": "2025-12-11 11:53:02.402181+00:00",
+    "fetched_at": "2025-12-11T17:23:17.501897"
   }
 }
