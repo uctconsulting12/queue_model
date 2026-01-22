@@ -28,7 +28,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 
 # Import queue monitoring
 from src.local_models.queue_model.queue_monitoring import QueueMonitoringSystem
-# from queue_monitoring import QueueMonitoringSystem
+#from queue_monitoring import QueueMonitoringSystem
 
 # Global state
 yolo_model = None

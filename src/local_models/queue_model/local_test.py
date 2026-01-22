@@ -21,10 +21,10 @@ from db_manager import get_camera_config, check_for_updates, sync_all_cameras, l
 from inference import model_fn, input_fn, predict_fn, output_fn
 
 # Configuration
-VIDEO_PATH = r"C:\Users\uct\Desktop\Q_Code\Vid1.mp4"  # Change this to your video path
-CAMERA_ID = 1
-USER_ID = 2
-ORG_ID = 2
+VIDEO_PATH = r"E:\UTC project\utc\cctv\CCTV_Project\Queue_Monitering_V2\Video\Vid.mp4"  # Change this to your video path
+CAMERA_ID = 8621
+USER_ID = 4
+ORG_ID = 4
 CHECK_UPDATE_INTERVAL = 120  # Check for DB updates every 30 seconds
 
 
