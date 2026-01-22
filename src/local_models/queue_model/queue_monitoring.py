@@ -270,7 +270,7 @@ class QueueMonitoringSystem:
         front_wait_times = []
         avg_wait_times = []
         statuses = []
-        alert_states = []  # NEW: Tracks if new alert should be sent
+        alert_states = []
 
         for queue in self.queues:
             queue_id = queue['queue_id']
@@ -280,22 +280,22 @@ class QueueMonitoringSystem:
 
             if length == 0:
                 # Queue is empty - reset everything
-                front_wait_times.append("00:00:00")  # Changed to HH:MM:SS
-                avg_wait_times.append("00:00:00")    # Changed to HH:MM:SS
+                front_wait_times.append("00:00:00")
+                avg_wait_times.append("00:00:00")
                 statuses.append("OK")
                 alert_states.append(False)
-                self.queue_alert_active[queue_id] = False  # Reset alert state
+                self.queue_alert_active[queue_id] = False
             else:
                 # Calculate wait times (in minutes for internal use)
                 persons_sorted = sorted(persons, key=lambda p: p['bbox'][1])
                 front_person = persons_sorted[0]
                 front_wait = front_person['wait_time']  # in minutes
-                front_wait_seconds = front_wait * 60.0  # convert to seconds
-                front_wait_times.append(seconds_to_hms(front_wait_seconds))  # Changed to HH:MM:SS
+                front_wait_seconds = front_wait * 60.0
+                front_wait_times.append(seconds_to_hms(front_wait_seconds))
 
-                avg_wait = sum(p['wait_time'] for p in persons) / length  # in minutes
-                avg_wait_seconds = avg_wait * 60.0  # convert to seconds
-                avg_wait_times.append(seconds_to_hms(avg_wait_seconds))  # Changed to HH:MM:SS
+                avg_wait = sum(p['wait_time'] for p in persons) / length
+                avg_wait_seconds = avg_wait * 60.0
+                avg_wait_times.append(seconds_to_hms(avg_wait_seconds))
 
                 # Determine ACTUAL status (always reflects current reality)
                 if length > self.max_length:
@@ -309,18 +309,26 @@ class QueueMonitoringSystem:
 
                 statuses.append(actual_status)
 
-                # Determine if NEW alert should be triggered
-                should_alert = False
+                # FIXED: Explicit handling of all state transitions
+                should_alert = False  # Default: no new alert
 
-                if actual_status != "OK" and not self.queue_alert_active[queue_id]:
-                    # Problem detected AND no active alert - TRIGGER NEW ALERT
-                    should_alert = True
-                    self.queue_alert_active[queue_id] = True
-                    logger.info(f"Alert triggered for Queue {queue_id}: {actual_status}")
-                elif actual_status == "OK" and self.queue_alert_active[queue_id]:
-                    # Problem resolved - RESET alert state
-                    self.queue_alert_active[queue_id] = False
-                    logger.info(f"Alert cleared for Queue {queue_id}")
+                if actual_status == "OK":
+                    # No problem detected
+                    if self.queue_alert_active[queue_id]:
+                        # Problem was resolved - clear alert state
+                        self.queue_alert_active[queue_id] = False
+                        logger.info(f"Alert cleared for Queue {queue_id}")
+                    # should_alert remains False (explicitly)
+                else:
+                    # Problem detected
+                    if not self.queue_alert_active[queue_id]:
+                        # NEW problem - trigger alert
+                        should_alert = True
+                        self.queue_alert_active[queue_id] = True
+                        logger.info(f"Alert triggered for Queue {queue_id}: {actual_status}")
+                    else:
+                        # Problem continues - don't re-alert (explicitly)
+                        should_alert = False
 
                 alert_states.append(should_alert)
 
@@ -328,8 +336,8 @@ class QueueMonitoringSystem:
             'lengths': lengths,
             'front_wait_times': front_wait_times,
             'avg_wait_times': avg_wait_times,
-            'statuses': statuses,  # Always reflects actual current status
-            'should_alert': alert_states  # Only True when NEW alert should be sent
+            'statuses': statuses,
+            'should_alert': alert_states
         }
 
     def _create_annotated_frame(self, frame: np.ndarray, tracked_persons: List,
