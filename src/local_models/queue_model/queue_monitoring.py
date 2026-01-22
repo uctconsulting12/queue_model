@@ -1,8 +1,6 @@
-# queue_monitoring.py
 """
-Queue monitoring core - same logic as AWS version
+Queue monitoring core - Enhanced with alert debouncing
 Person detection, tracking, queue assignment, wait time calculation
-Updated: All waiting times in HH:MM:SS format
 """
 
 import time
@@ -125,35 +123,25 @@ class SimplePersonTracker:
 
 
 class QueueMonitoringSystem:
-    """Queue monitoring system - same as AWS version"""
+    """Queue monitoring system with alert debouncing"""
 
     def __init__(self, model, camera_config: Dict[str, Any]):
         self.model = model
         self.config = camera_config
+        self.camid = camera_config.get("camid", 0)
+        self.queues = camera_config.get("queues_coordinates", [])
 
-        # All required fields - no defaults
-        if "camid" not in camera_config:
-            raise ValueError("camid is required in camera_config")
-        if "queues_coordinates" not in camera_config:
-            raise ValueError("queues_coordinates is required in camera_config")
-        if "max_length_allowed" not in camera_config:
-            raise ValueError("max_length_allowed is required in camera_config")
-        if "max_waiting_time_queue" not in camera_config:
-            raise ValueError("max_waiting_time_queue is required in camera_config")
-        if "max_waiting_time_front_person" not in camera_config:
-            raise ValueError("max_waiting_time_front_person is required in camera_config")
-
-        self.camid = camera_config["camid"]
-        self.queues = camera_config["queues_coordinates"]
-        self.max_length = camera_config["max_length_allowed"]
-        self.max_queue_wait = camera_config["max_waiting_time_queue"]
-        self.max_front_wait = camera_config["max_waiting_time_front_person"]
+        self.max_length = camera_config.get("max_length_allowed", 10)
+        self.max_queue_wait = camera_config.get("max_waiting_time_queue", 300)
+        self.max_front_wait = camera_config.get("max_waiting_time_front_person", 120)
 
         self.tracker = SimplePersonTracker()
         self.entry_counters = {q["queue_id"]: 0 for q in self.queues}
         self.exit_counters = {q["queue_id"]: 0 for q in self.queues}
-        # Alert debouncing - tracks if alert is currently active for each queue
+
+        # NEW: Alert debouncing - tracks if alert is currently active for each queue
         self.queue_alert_active = {q["queue_id"]: False for q in self.queues}
+
         self.frame_count = 0
 
         logger.info(f"Initialized QueueMonitoringSystem for camera {self.camid} with {len(self.queues)} queues")
@@ -175,7 +163,7 @@ class QueueMonitoringSystem:
         return None
 
     def process_frame(self, frame: np.ndarray, return_annotated: bool = True) -> Dict[str, Any]:
-        """Process frame - same as AWS version"""
+        """Process frame with alert debouncing"""
         start_time = time.time()
         self.frame_count += 1
         current_time = datetime.now()
@@ -201,185 +189,224 @@ class QueueMonitoringSystem:
         # Update tracker
         tracked_persons = self.tracker.update(detections)
 
-        # Assign persons to queues
-        queue_assignments = {q["queue_id"]: [] for q in self.queues}
+        # Queue assignments
+        queue_assignments = {queue['queue_id']: [] for queue in self.queues}
+
+        person_data = {
+            'ids': [], 'queue_ids': [], 'entry_times': [],
+            'wait_times': [], 'bboxes': [], 'confidences': []
+        }
 
         for person in tracked_persons:
             queue_id = self._assign_to_queue(person)
-            if queue_id is not None:
-                entry_time = person.get('entry_time')
-                if entry_time:
-                    wait_time_seconds = (current_time - entry_time).total_seconds()
-                    queue_assignments[queue_id].append({
-                        'person_id': person['person_id'],
-                        'bbox': person['bbox'],
-                        'confidence': person['confidence'],
-                        'entry_time': entry_time,
-                        'wait_time': wait_time_seconds,
-                        'wait_time_hms': seconds_to_hms(wait_time_seconds)  # HH:MM:SS format
-                    })
+            person_id = person['person_id']
+            entry_time = person['entry_time']
+            wait_time_seconds = (current_time - entry_time).total_seconds()
+            wait_time_minutes = wait_time_seconds / 60.0  # Keep for internal use
 
-        # Build queue results with HH:MM:SS format
-        queue_results = []
+            person_data['ids'].append(person_id)
+            person_data['queue_ids'].append(queue_id if queue_id else 0)
+            person_data['entry_times'].append(entry_time.strftime("%H:%M:%S"))
+            person_data['wait_times'].append(seconds_to_hms(wait_time_seconds))  # Changed to HH:MM:SS
+            person_data['bboxes'].append(person['bbox'])
+            person_data['confidences'].append(person['confidence'])
 
-        for queue in self.queues:
-            queue_id = queue["queue_id"]
-            queue_name = queue.get("name", f"Queue_{queue_id}")
-            persons = queue_assignments[queue_id]
-            person_count = len(persons)
-
-            # Calculate waiting times
-            if persons:
-                wait_times = [p['wait_time'] for p in persons]
-                avg_wait_time_seconds = sum(wait_times) / len(wait_times)
-                max_wait_time_seconds = max(wait_times)
-
-                # Find front person (assuming lowest Y coordinate is front)
-                front_person = min(persons, key=lambda p: p['bbox'][1])
-                front_wait_time_seconds = front_person['wait_time']
-            else:
-                avg_wait_time_seconds = 0.0
-                max_wait_time_seconds = 0.0
-                front_wait_time_seconds = 0.0
-
-            # Convert to HH:MM:SS format
-            avg_wait_time_hms = seconds_to_hms(avg_wait_time_seconds)
-            max_wait_time_hms = seconds_to_hms(max_wait_time_seconds)
-            front_wait_time_hms = seconds_to_hms(front_wait_time_seconds)
-
-            # Check thresholds
-            is_overcrowded = person_count > self.max_length
-            waiting_time_exceeded = max_wait_time_seconds > self.max_queue_wait
-            front_person_wait_exceeded = front_wait_time_seconds > self.max_front_wait
-
-            # Alert logic with debouncing
-            alert_triggered = is_overcrowded or waiting_time_exceeded or front_person_wait_exceeded
-
-            # Update alert state
-            if alert_triggered:
-                if not self.queue_alert_active[queue_id]:
-                    # Alert just became active
-                    logger.warning(f"ALERT: Queue {queue_id} - Overcrowded: {is_overcrowded}, "
-                                   f"Wait exceeded: {waiting_time_exceeded}, "
-                                   f"Front wait exceeded: {front_person_wait_exceeded}")
-                    self.queue_alert_active[queue_id] = True
-            else:
-                if self.queue_alert_active[queue_id]:
-                    # Alert just cleared
-                    logger.info(f"Alert cleared for queue {queue_id}")
-                    self.queue_alert_active[queue_id] = False
-
-            # Build detection list with HH:MM:SS format
-            detections = []
-            for person in persons:
-                detections.append({
-                    "person_id": person['person_id'],
-                    "bbox": list(person['bbox']),
-                    "confidence": round(person['confidence'], 2),
-                    "waiting_time": person['wait_time_hms']  # HH:MM:SS format
+            if queue_id:
+                queue_assignments[queue_id].append({
+                    'person_id': person_id,
+                    'wait_time': wait_time_minutes,  # Keep in minutes for internal calculations
+                    'bbox': person['bbox']
                 })
 
-            queue_result = {
-                "queue_id": queue_id,
-                "name": queue_name,
-                "person_count": person_count,
-                "average_waiting_time": avg_wait_time_hms,  # HH:MM:SS format
-                "max_waiting_time": max_wait_time_hms,  # HH:MM:SS format
-                "front_person_waiting_time": front_wait_time_hms,  # HH:MM:SS format
-                "is_overcrowded": is_overcrowded,
-                "waiting_time_exceeded": waiting_time_exceeded,
-                "front_person_wait_exceeded": front_person_wait_exceeded,
-                "alert_active": self.queue_alert_active[queue_id],
-                "detections": detections
-            }
+        # Calculate queue stats with alert debouncing
+        queue_stats = self._calculate_queue_stats(queue_assignments)
 
-            queue_results.append(queue_result)
+        # Create annotated frame
+        annotated_frame = None
+        if return_annotated:
+            annotated_frame = self._create_annotated_frame(
+                frame.copy(), tracked_persons, queue_assignments
+            )
 
-        # Processing time
         processing_time = time.time() - start_time
 
-        # Build result
+        # Build result - NOW INCLUDES Should_Alert field
         result = {
-            "timestamp": timestamp,
-            "queue_results": queue_results,
-            "total_persons_detected": len(tracked_persons),
-            "processing_time_ms": round(processing_time * 1000, 2),
-            "frame_number": self.frame_count
+            "Frame_Id": str(int(time.time() * 1000)),
+            "Time_stamp": timestamp,
+            "Queue_Count": len(self.queues),
+            "Queue_Name": [q["name"] for q in self.queues],
+            "Queue_Length": queue_stats['lengths'],
+            "Front_person_Wt": queue_stats['front_wait_times'],
+            "Average_wt_time": queue_stats['avg_wait_times'],
+            "Status": queue_stats['statuses'],
+            "Should_Alert": queue_stats['should_alert'],  # NEW: Alert debouncing flag
+            "Total_people_detected": len(tracked_persons),
+            "People_ids": person_data['ids'],
+            "Queue_Assignment": person_data['queue_ids'],
+            "Entry_time": person_data['entry_times'],
+            "People_wt_time": person_data['wait_times'],
+            "Annotated_Frame": annotated_frame,
+            "x": [bbox[0] for bbox in person_data['bboxes']],
+            "y": [bbox[1] for bbox in person_data['bboxes']],
+            "w": [bbox[2] for bbox in person_data['bboxes']],
+            "h": [bbox[3] for bbox in person_data['bboxes']],
+            "accuracy": person_data['confidences'],
+            "Entry_Counts": [self.entry_counters[q["queue_id"]] for q in self.queues],
+            "Exit_Counts": [self.exit_counters[q["queue_id"]] for q in self.queues],
+            "Processing_Time_ms": int(processing_time * 1000),
+            "Tracker_Stats": self.tracker.get_stats()
         }
-
-        # Add annotated frame if requested
-        if return_annotated:
-            result['Annotated_Frame'] = self._create_annotated_frame(
-                frame, tracked_persons, queue_assignments
-            )
 
         return result
 
-    def _create_annotated_frame(self, frame: np.ndarray, tracked_persons: List[Dict[str, Any]],
-                                queue_assignments: Dict[int, List[Dict[str, Any]]]) -> np.ndarray:
-        """Create annotated frame with queue visualization"""
+    def _calculate_queue_stats(self, queue_assignments: Dict[int, List]) -> Dict[str, List]:
+        """Calculate queue statistics with alert debouncing
+
+        Returns actual status AND whether a new alert should be triggered.
+        Alert is only triggered once when problem first detected, and resets when resolved.
+        """
+        lengths = []
+        front_wait_times = []
+        avg_wait_times = []
+        statuses = []
+        alert_states = []  # NEW: Tracks if new alert should be sent
+
+        for queue in self.queues:
+            queue_id = queue['queue_id']
+            persons = queue_assignments.get(queue_id, [])
+            length = len(persons)
+            lengths.append(length)
+
+            if length == 0:
+                # Queue is empty - reset everything
+                front_wait_times.append("00:00:00")  # Changed to HH:MM:SS
+                avg_wait_times.append("00:00:00")    # Changed to HH:MM:SS
+                statuses.append("OK")
+                alert_states.append(False)
+                self.queue_alert_active[queue_id] = False  # Reset alert state
+            else:
+                # Calculate wait times (in minutes for internal use)
+                persons_sorted = sorted(persons, key=lambda p: p['bbox'][1])
+                front_person = persons_sorted[0]
+                front_wait = front_person['wait_time']  # in minutes
+                front_wait_seconds = front_wait * 60.0  # convert to seconds
+                front_wait_times.append(seconds_to_hms(front_wait_seconds))  # Changed to HH:MM:SS
+
+                avg_wait = sum(p['wait_time'] for p in persons) / length  # in minutes
+                avg_wait_seconds = avg_wait * 60.0  # convert to seconds
+                avg_wait_times.append(seconds_to_hms(avg_wait_seconds))  # Changed to HH:MM:SS
+
+                # Determine ACTUAL status (always reflects current reality)
+                if length > self.max_length:
+                    actual_status = "QUEUE_TOO_LONG"
+                elif front_wait > (self.max_front_wait / 60.0):
+                    actual_status = "FRONT_WAIT_EXCEEDED"
+                elif avg_wait > (self.max_queue_wait / 60.0):
+                    actual_status = "AVG_WAIT_EXCEEDED"
+                else:
+                    actual_status = "OK"
+
+                statuses.append(actual_status)
+
+                # Determine if NEW alert should be triggered
+                should_alert = False
+
+                if actual_status != "OK" and not self.queue_alert_active[queue_id]:
+                    # Problem detected AND no active alert - TRIGGER NEW ALERT
+                    should_alert = True
+                    self.queue_alert_active[queue_id] = True
+                    logger.info(f"Alert triggered for Queue {queue_id}: {actual_status}")
+                elif actual_status == "OK" and self.queue_alert_active[queue_id]:
+                    # Problem resolved - RESET alert state
+                    self.queue_alert_active[queue_id] = False
+                    logger.info(f"Alert cleared for Queue {queue_id}")
+
+                alert_states.append(should_alert)
+
+        return {
+            'lengths': lengths,
+            'front_wait_times': front_wait_times,
+            'avg_wait_times': avg_wait_times,
+            'statuses': statuses,  # Always reflects actual current status
+            'should_alert': alert_states  # Only True when NEW alert should be sent
+        }
+
+    def _create_annotated_frame(self, frame: np.ndarray, tracked_persons: List,
+                                queue_assignments: Dict) -> np.ndarray:
+        """Create enhanced annotated frame with improved text visibility - No overlapping"""
         try:
             annotated = frame.copy()
-            frame_height, frame_width = frame.shape[:2]
+            frame_height, frame_width = annotated.shape[:2]
 
-            # Helper function to draw text with background
-            def draw_text_with_background(img, text, position, font, font_scale, text_color, bg_color, thickness,
-                                          padding):
-                """Draw text with background rectangle for better visibility"""
-                (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+            # Helper: Draw text with background for better visibility
+            def draw_text_with_background(img, text, position, font, font_scale, text_color, bg_color, thickness=2, padding=5):
+                """Draw text with a solid background to prevent overlapping"""
                 x, y = position
+                text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
+                text_w, text_h = text_size
 
                 # Draw background rectangle
                 cv2.rectangle(img,
-                              (x - padding, y - text_height - padding),
-                              (x + text_width + padding, y + baseline + padding),
-                              bg_color, -1)
+                            (x - padding, y - text_h - padding),
+                            (x + text_w + padding, y + padding),
+                            bg_color, -1)
 
                 # Draw text
-                cv2.putText(img, text, (x, y), font, font_scale, text_color, thickness, cv2.LINE_AA)
+                cv2.putText(img, text, (x, y), font, font_scale, text_color, thickness)
 
-            # Helper function to find front person in queue
-            def find_front_person_in_queue(queue_id):
-                """Find the front person in a queue (lowest y-coordinate)"""
+                return text_w, text_h
+
+            # Helper: Find front person in each queue (earliest entry time)
+            def find_front_person_in_queue(queue_id: int) -> Optional[int]:
+                """Find the person who entered the queue first"""
+                queue_people = []
+                for person in tracked_persons:
+                    for qid, persons in queue_assignments.items():
+                        if qid == queue_id and any(p['person_id'] == person['person_id'] for p in persons):
+                            queue_people.append((person['person_id'], person['entry_time']))
+                            break
+
+                if queue_people:
+                    queue_people.sort(key=lambda x: x[1])
+                    return queue_people[0][0]
+                return None
+
+            # Helper: Get queue status color
+            def get_queue_status_color(queue_id: int, count: int) -> tuple:
+                """Determine queue color based on status"""
                 persons = queue_assignments.get(queue_id, [])
                 if not persons:
-                    return None
+                    return (0, 255, 0)
 
-                # Front person is the one with lowest y-coordinate (top of frame)
-                front_person = min(persons, key=lambda p: p['bbox'][1])
-                return front_person['person_id']
+                front_wait = max([p['wait_time'] for p in persons]) if persons else 0
+                avg_wait = sum([p['wait_time'] for p in persons]) / len(persons) if persons else 0
 
-            # Helper function to determine queue status color
-            def get_queue_status_color(queue_id, count):
-                """Determine color based on queue status"""
-                is_overcrowded = count > self.max_length
-
-                persons = queue_assignments.get(queue_id, [])
-                waiting_time_exceeded = False
-                if persons:
-                    max_wait = max([p['wait_time'] for p in persons])
-                    waiting_time_exceeded = max_wait > self.max_queue_wait
-
-                if is_overcrowded or waiting_time_exceeded:
-                    return (0, 0, 255)  # Red - alert
-                elif count > 0:
-                    return (0, 255, 0)  # Green - occupied
+                if count > self.max_length:
+                    return (0, 0, 255)
+                elif front_wait > (self.max_front_wait / 60.0) * 0.8:
+                    return (0, 165, 255)
+                elif avg_wait > (self.max_queue_wait / 60.0) * 0.8:
+                    return (0, 165, 255)
                 else:
-                    return (128, 128, 128)  # Gray - empty
+                    return (0, 255, 0)
 
-            # Add semi-transparent overlay for header
-            try:
-                overlay = annotated.copy()
-                cv2.rectangle(overlay, (0, 0), (frame_width, 60), (0, 0, 0), -1)
-                cv2.addWeighted(overlay, 0.3, annotated, 0.7, 0, annotated)
-            except Exception as e:
-                logger.error(f"Error adding header overlay: {e}")
+            # Create semi-transparent overlay for top info panel
+            overlay = annotated.copy()
 
-            # Add camera info at top
+            # Calculate height needed for top panel
+            num_queues = len(self.queues)
+            panel_height = 50 + (num_queues * 30)
+
+            # Draw top panel background (semi-transparent black)
+            cv2.rectangle(overlay, (0, 0), (frame_width, panel_height), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.6, annotated, 0.4, 0, annotated)
+
+            # Add Camera ID at top with better spacing
             try:
                 cam_info = f"Camera ID: {self.camid}"
                 cv2.putText(annotated, cam_info, (15, 35),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
             except Exception as e:
                 logger.error(f"Error adding camera info: {e}")
 
@@ -392,9 +419,10 @@ class QueueMonitoringSystem:
                     persons = queue_assignments.get(queue_id, [])
                     queue_length = len(persons)
 
-                    # Calculate average wait time in HH:MM:SS format
+                    # Calculate average wait time and convert to HH:MM:SS
                     if persons:
-                        avg_wait_seconds = sum([p['wait_time'] for p in persons]) / len(persons)
+                        avg_wait_minutes = sum([p['wait_time'] for p in persons]) / len(persons)
+                        avg_wait_seconds = avg_wait_minutes * 60.0
                         avg_wait_hms = seconds_to_hms(avg_wait_seconds)
                     else:
                         avg_wait_hms = "00:00:00"
@@ -408,7 +436,7 @@ class QueueMonitoringSystem:
 
                     queue_info = f"{queue_name}: {queue_length} people, Avg: {avg_wait_hms}"
                     cv2.putText(annotated, queue_info, (45, y_offset),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
                     y_offset += 30
             except Exception as e:
                 logger.error(f"Error adding queue summary: {e}")
@@ -433,8 +461,8 @@ class QueueMonitoringSystem:
                     # Draw queue name label at top-left of queue with background
                     label_y = max(y + 25, 25)
                     draw_text_with_background(annotated, queue_name, (x + 8, label_y),
-                                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255),
-                                              color, 2, 5)
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255),
+                                            color, 2, 5)
 
             except Exception as e:
                 logger.error(f"Error drawing queue rectangles: {e}")
@@ -499,14 +527,14 @@ class QueueMonitoringSystem:
                     # Background for ID
                     padding = 6
                     cv2.rectangle(annotated,
-                                  (id_x - padding, id_y - text_size[1] - padding),
-                                  (id_x + text_size[0] + padding, id_y + padding),
-                                  bg_color, -1)
+                                (id_x - padding, id_y - text_size[1] - padding),
+                                (id_x + text_size[0] + padding, id_y + padding),
+                                bg_color, -1)
 
                     cv2.putText(annotated, id_text, (id_x, id_y),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2, cv2.LINE_AA)
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2, cv2.LINE_AA)
 
-                    # Draw waiting time above box if in queue with background (HH:MM:SS format)
+                    # Draw waiting time above box if in queue with background
                     if is_inside_queue and entry_time:
                         current_time = datetime.now()
                         wait_time_seconds = (current_time - entry_time).total_seconds()
@@ -524,8 +552,8 @@ class QueueMonitoringSystem:
                         # Position above box with enough clearance
                         wait_y = max(30, y1 - 15)
                         draw_text_with_background(annotated, wait_text, (x1, wait_y),
-                                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                                                  wait_text_color, wait_bg_color, 2, 5)
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                                                wait_text_color, wait_bg_color, 2, 5)
 
             except Exception as e:
                 logger.error(f"Error drawing person annotations: {e}")
@@ -539,8 +567,8 @@ class QueueMonitoringSystem:
                 info_y = frame_height - 20
 
                 draw_text_with_background(annotated, sys_info, (info_x, info_y),
-                                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0),
-                                          (0, 0, 0), 2, 8)
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0),
+                                        (0, 0, 0), 2, 8)
             except Exception as e:
                 logger.warning(f"Failed to add system info: {e}")
 
@@ -559,5 +587,5 @@ class QueueMonitoringSystem:
             "tracker_stats": self.tracker.get_stats(),
             "entry_counters": self.entry_counters,
             "exit_counters": self.exit_counters,
-            "alert_states": self.queue_alert_active  # Show which queues have active alerts
+            "alert_states": self.queue_alert_active  # NEW: Show which queues have active alerts
         }
