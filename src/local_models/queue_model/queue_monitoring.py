@@ -18,37 +18,57 @@ MAX_TRACKING_DISTANCE = 90.0
 STALE_TRACK_SECONDS = 8.0
 
 
+def seconds_to_hms(seconds: float) -> str:
+    """
+    Convert seconds to HH:MM:SS format
+
+    Args:
+        seconds: Time in seconds (float)
+
+    Returns:
+        Formatted string "HH:MM:SS"
+    """
+    if seconds < 0:
+        seconds = 0
+
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 class SimplePersonTracker:
     """Simple person tracker with ID assignment"""
-    
+
     def __init__(self):
         self.next_id = 1
         self.tracks: Dict[int, Dict[str, Any]] = {}
         self.removed_tracks: Dict[int, Dict[str, Any]] = {}
-        
+
     def update(self, detections: List[Tuple[int, int, int, int, float]]) -> List[Dict[str, Any]]:
         """Update tracker with new detections"""
         current_time = datetime.now()
         updated_tracks = []
         matched_track_ids = set()
-        
+
         # Match detections to existing tracks
         for x, y, w, h, conf in detections:
             cx, cy = x + w // 2, y + h // 2
             best_match_id = None
             best_distance = MAX_TRACKING_DISTANCE
-            
+
             for track_id, track in self.tracks.items():
                 if track_id in matched_track_ids:
                     continue
-                
+
                 tx, ty = track['center']
                 distance = np.sqrt((cx - tx) ** 2 + (cy - ty) ** 2)
-                
+
                 if distance < best_distance:
                     best_distance = distance
                     best_match_id = track_id
-            
+
             if best_match_id:
                 self.tracks[best_match_id].update({
                     'bbox': (x, y, w, h),
@@ -66,7 +86,7 @@ class SimplePersonTracker:
             else:
                 person_id = self.next_id
                 self.next_id += 1
-                
+
                 self.tracks[person_id] = {
                     'bbox': (x, y, w, h),
                     'center': (cx, cy),
@@ -74,26 +94,26 @@ class SimplePersonTracker:
                     'entry_time': current_time,
                     'last_seen': current_time
                 }
-                
+
                 updated_tracks.append({
                     'person_id': person_id,
                     'bbox': (x, y, w, h),
                     'confidence': conf,
                     'entry_time': current_time
                 })
-        
+
         # Remove stale tracks
         stale_ids = []
         for track_id, track in self.tracks.items():
             time_since_seen = (current_time - track['last_seen']).total_seconds()
             if time_since_seen > STALE_TRACK_SECONDS:
                 stale_ids.append(track_id)
-        
+
         for track_id in stale_ids:
             self.removed_tracks[track_id] = self.tracks.pop(track_id)
-        
+
         return updated_tracks
-    
+
     def get_stats(self) -> Dict[str, Any]:
         return {
             "active_tracks": len(self.tracks),
@@ -104,56 +124,56 @@ class SimplePersonTracker:
 
 class QueueMonitoringSystem:
     """Queue monitoring system with alert debouncing"""
-    
+
     def __init__(self, model, camera_config: Dict[str, Any]):
         self.model = model
         self.config = camera_config
         self.camid = camera_config.get("camid", 0)
         self.queues = camera_config.get("queues_coordinates", [])
-        
+
         self.max_length = camera_config.get("max_length_allowed", 10)
         self.max_queue_wait = camera_config.get("max_waiting_time_queue", 300)
         self.max_front_wait = camera_config.get("max_waiting_time_front_person", 120)
-        
+
         self.tracker = SimplePersonTracker()
         self.entry_counters = {q["queue_id"]: 0 for q in self.queues}
         self.exit_counters = {q["queue_id"]: 0 for q in self.queues}
-        
+
         # NEW: Alert debouncing - tracks if alert is currently active for each queue
         self.queue_alert_active = {q["queue_id"]: False for q in self.queues}
-        
+
         self.frame_count = 0
-        
+
         logger.info(f"Initialized QueueMonitoringSystem for camera {self.camid} with {len(self.queues)} queues")
-    
+
     def _point_in_rect(self, px: int, py: int, rect: Dict[str, int]) -> bool:
         """Check if point is inside rectangle"""
         x, y, w, h = rect['x'], rect['y'], rect['w'], rect['h']
         return x <= px < (x + w) and y <= py < (y + h)
-    
+
     def _assign_to_queue(self, person: Dict[str, Any]) -> Optional[int]:
         """Assign person to queue based on position"""
         x, y, w, h = person['bbox']
         cx, cy = x + w // 2, y + h // 2
-        
+
         for queue in self.queues:
             if self._point_in_rect(cx, cy, queue['rect']):
                 return queue['queue_id']
-        
+
         return None
-    
+
     def process_frame(self, frame: np.ndarray, return_annotated: bool = True) -> Dict[str, Any]:
         """Process frame with alert debouncing"""
         start_time = time.time()
         self.frame_count += 1
         current_time = datetime.now()
         timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # YOLO detection
         try:
             results = self.model(frame, verbose=False)
             detections = []
-            
+
             for result in results:
                 boxes = result.boxes
                 for box in boxes:
@@ -165,50 +185,51 @@ class QueueMonitoringSystem:
         except Exception as e:
             logger.error(f"YOLO detection failed: {e}")
             detections = []
-        
+
         # Update tracker
         tracked_persons = self.tracker.update(detections)
-        
+
         # Queue assignments
         queue_assignments = {queue['queue_id']: [] for queue in self.queues}
-        
+
         person_data = {
-            'ids': [], 'queue_ids': [], 'entry_times': [], 
+            'ids': [], 'queue_ids': [], 'entry_times': [],
             'wait_times': [], 'bboxes': [], 'confidences': []
         }
-        
+
         for person in tracked_persons:
             queue_id = self._assign_to_queue(person)
             person_id = person['person_id']
             entry_time = person['entry_time']
-            wait_time = (current_time - entry_time).total_seconds() / 60.0
-            
+            wait_time_seconds = (current_time - entry_time).total_seconds()
+            wait_time_minutes = wait_time_seconds / 60.0  # Keep for internal use
+
             person_data['ids'].append(person_id)
             person_data['queue_ids'].append(queue_id if queue_id else 0)
             person_data['entry_times'].append(entry_time.strftime("%H:%M:%S"))
-            person_data['wait_times'].append(round(wait_time, 2))
+            person_data['wait_times'].append(seconds_to_hms(wait_time_seconds))  # Changed to HH:MM:SS
             person_data['bboxes'].append(person['bbox'])
             person_data['confidences'].append(person['confidence'])
-            
+
             if queue_id:
                 queue_assignments[queue_id].append({
                     'person_id': person_id,
-                    'wait_time': wait_time,
+                    'wait_time': wait_time_minutes,  # Keep in minutes for internal calculations
                     'bbox': person['bbox']
                 })
-        
+
         # Calculate queue stats with alert debouncing
         queue_stats = self._calculate_queue_stats(queue_assignments)
-        
+
         # Create annotated frame
         annotated_frame = None
         if return_annotated:
             annotated_frame = self._create_annotated_frame(
                 frame.copy(), tracked_persons, queue_assignments
             )
-        
+
         processing_time = time.time() - start_time
-        
+
         # Build result - NOW INCLUDES Should_Alert field
         result = {
             "Frame_Id": str(int(time.time() * 1000)),
@@ -236,12 +257,12 @@ class QueueMonitoringSystem:
             "Processing_Time_ms": int(processing_time * 1000),
             "Tracker_Stats": self.tracker.get_stats()
         }
-        
+
         return result
 
     def _calculate_queue_stats(self, queue_assignments: Dict[int, List]) -> Dict[str, List]:
         """Calculate queue statistics with alert debouncing
-        
+
         Returns actual status AND whether a new alert should be triggered.
         Alert is only triggered once when problem first detected, and resets when resolved.
         """
@@ -250,30 +271,32 @@ class QueueMonitoringSystem:
         avg_wait_times = []
         statuses = []
         alert_states = []  # NEW: Tracks if new alert should be sent
-        
+
         for queue in self.queues:
             queue_id = queue['queue_id']
             persons = queue_assignments.get(queue_id, [])
             length = len(persons)
             lengths.append(length)
-            
+
             if length == 0:
                 # Queue is empty - reset everything
-                front_wait_times.append(0.0)
-                avg_wait_times.append(0.0)
+                front_wait_times.append("00:00:00")  # Changed to HH:MM:SS
+                avg_wait_times.append("00:00:00")    # Changed to HH:MM:SS
                 statuses.append("OK")
                 alert_states.append(False)
                 self.queue_alert_active[queue_id] = False  # Reset alert state
             else:
-                # Calculate wait times
+                # Calculate wait times (in minutes for internal use)
                 persons_sorted = sorted(persons, key=lambda p: p['bbox'][1])
                 front_person = persons_sorted[0]
-                front_wait = front_person['wait_time']
-                front_wait_times.append(round(front_wait, 2))
-                
-                avg_wait = sum(p['wait_time'] for p in persons) / length
-                avg_wait_times.append(round(avg_wait, 2))
-                
+                front_wait = front_person['wait_time']  # in minutes
+                front_wait_seconds = front_wait * 60.0  # convert to seconds
+                front_wait_times.append(seconds_to_hms(front_wait_seconds))  # Changed to HH:MM:SS
+
+                avg_wait = sum(p['wait_time'] for p in persons) / length  # in minutes
+                avg_wait_seconds = avg_wait * 60.0  # convert to seconds
+                avg_wait_times.append(seconds_to_hms(avg_wait_seconds))  # Changed to HH:MM:SS
+
                 # Determine ACTUAL status (always reflects current reality)
                 if length > self.max_length:
                     actual_status = "QUEUE_TOO_LONG"
@@ -283,12 +306,12 @@ class QueueMonitoringSystem:
                     actual_status = "AVG_WAIT_EXCEEDED"
                 else:
                     actual_status = "OK"
-                
+
                 statuses.append(actual_status)
-                
+
                 # Determine if NEW alert should be triggered
                 should_alert = False
-                
+
                 if actual_status != "OK" and not self.queue_alert_active[queue_id]:
                     # Problem detected AND no active alert - TRIGGER NEW ALERT
                     should_alert = True
@@ -298,9 +321,9 @@ class QueueMonitoringSystem:
                     # Problem resolved - RESET alert state
                     self.queue_alert_active[queue_id] = False
                     logger.info(f"Alert cleared for Queue {queue_id}")
-                
+
                 alert_states.append(should_alert)
-        
+
         return {
             'lengths': lengths,
             'front_wait_times': front_wait_times,
@@ -395,7 +418,14 @@ class QueueMonitoringSystem:
                     queue_name = queue['name']
                     persons = queue_assignments.get(queue_id, [])
                     queue_length = len(persons)
-                    avg_wait = sum([p['wait_time'] for p in persons]) / len(persons) if persons else 0
+
+                    # Calculate average wait time and convert to HH:MM:SS
+                    if persons:
+                        avg_wait_minutes = sum([p['wait_time'] for p in persons]) / len(persons)
+                        avg_wait_seconds = avg_wait_minutes * 60.0
+                        avg_wait_hms = seconds_to_hms(avg_wait_seconds)
+                    else:
+                        avg_wait_hms = "00:00:00"
 
                     # Color code the status
                     status_color = get_queue_status_color(queue_id, queue_length)
@@ -404,7 +434,7 @@ class QueueMonitoringSystem:
                     cv2.circle(annotated, (25, y_offset - 8), 8, status_color, -1)
                     cv2.circle(annotated, (25, y_offset - 8), 8, (255, 255, 255), 1)
 
-                    queue_info = f"{queue_name}: {queue_length} people, Avg: {avg_wait:.1f}min"
+                    queue_info = f"{queue_name}: {queue_length} people, Avg: {avg_wait_hms}"
                     cv2.putText(annotated, queue_info, (45, y_offset),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
                     y_offset += 30
@@ -508,14 +538,14 @@ class QueueMonitoringSystem:
                     if is_inside_queue and entry_time:
                         current_time = datetime.now()
                         wait_time_seconds = (current_time - entry_time).total_seconds()
-                        wait_time_minutes = int(wait_time_seconds / 60)
+                        wait_time_hms = seconds_to_hms(wait_time_seconds)
 
                         if is_front_person:
-                            wait_text = f"FRONT: {wait_time_minutes}min"
+                            wait_text = f"FRONT: {wait_time_hms}"
                             wait_bg_color = (0, 0, 150)  # Dark red
                             wait_text_color = (255, 255, 255)  # White
                         else:
-                            wait_text = f"{wait_time_minutes}min"
+                            wait_text = f"{wait_time_hms}"
                             wait_bg_color = (0, 100, 0)  # Dark green
                             wait_text_color = (255, 255, 255)  # White
 
