@@ -132,23 +132,51 @@ logger = logging.getLogger("detection")
 
 
 def insert_data(data, s3_url):
-    """Insert data into queue_monitoring table using connection pooling."""
+    """
+    Insert or update queue monitoring data using PostgreSQL connection pooling.
+    Assumes:
+    - Should_Alert is JSONB
+    - frame_id is UNIQUE
+    """
 
     conn = None
+    cursor = None
+
     try:
-        conn = pool.getconn()   # ⬅ Borrow connection from pool
+        # 🔹 Borrow connection from pool
+        conn = pool.getconn()
         cursor = conn.cursor()
 
         insert_query = """
             INSERT INTO queue_monitoring (
-                camid, userid, org_id, frame_id, time_stamp, queue_count,
-                queue_name, queue_length, front_person_wt, average_wt_time,
-                status, total_people_detected, people_ids, queue_assignment,
-                entry_time, people_wt_time, processing_status, x, y, w, h,
-                accuracy, s3_url
-            ) VALUES (
+                camid,
+                userid,
+                org_id,
+                frame_id,
+                time_stamp,
+                queue_count,
+                queue_name,
+                queue_length,
+                front_person_wt,
+                Should_Alert,
+                average_wt_time,
+                status,
+                total_people_detected,
+                people_ids,
+                queue_assignment,
+                entry_time,
+                people_wt_time,
+                processing_status,
+                x,
+                y,
+                w,
+                h,
+                accuracy,
+                s3_url
+            )
+            VALUES (
                 %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s,
+                %s, %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s,
                 %s, %s, %s, %s,
@@ -156,7 +184,18 @@ def insert_data(data, s3_url):
             )
             ON CONFLICT (frame_id) DO UPDATE SET
                 time_stamp = EXCLUDED.time_stamp,
+                queue_count = EXCLUDED.queue_count,
+                queue_name = EXCLUDED.queue_name,
+                queue_length = EXCLUDED.queue_length,
+                front_person_wt = EXCLUDED.front_person_wt,
+                Should_Alert = EXCLUDED.Should_Alert,
+                average_wt_time = EXCLUDED.average_wt_time,
+                status = EXCLUDED.status,
                 total_people_detected = EXCLUDED.total_people_detected,
+                people_ids = EXCLUDED.people_ids,
+                queue_assignment = EXCLUDED.queue_assignment,
+                entry_time = EXCLUDED.entry_time,
+                people_wt_time = EXCLUDED.people_wt_time,
                 processing_status = EXCLUDED.processing_status,
                 x = EXCLUDED.x,
                 y = EXCLUDED.y,
@@ -167,44 +206,48 @@ def insert_data(data, s3_url):
         """
 
         cursor.execute(insert_query, (
-            data['camid'],
-            data['userid'],
-            data['org_id'],
-            data['Frame_Id'],
-            data['Time_stamp'],
-            data['Queue_Count'],
-            json.dumps(data['Queue_Name']),
-            json.dumps(data['Queue_Length']),
-            json.dumps(data['Front_person_Wt']),
-            json.dumps(data['Average_wt_time']),
-            json.dumps(data['Status']),
-            data['Total_people_detected'],
-            json.dumps(data['People_ids']),
-            json.dumps(data['Queue_Assignment']),
-            json.dumps(data['Entry_time']),
-            json.dumps(data['People_wt_time']),
-            data['Processing_Status'],
-            json.dumps(data['x']),
-            json.dumps(data['y']),
-            json.dumps(data['w']),
-            json.dumps(data['h']),
-            json.dumps(data['accuracy']),
+            data["camid"],
+            data["userid"],
+            data["org_id"],
+            data["Frame_Id"],
+            data["Time_stamp"],
+            data["Queue_Count"],
+
+            json.dumps(data["Queue_Name"]),
+            json.dumps(data["Queue_Length"]),
+            json.dumps(data["Front_person_Wt"]),
+            json.dumps(data["Should_Alert"]),      # ✅ ARRAY → JSONB
+            json.dumps(data["Average_wt_time"]),
+            json.dumps(data["Status"]),
+
+            data["Total_people_detected"],
+            json.dumps(data["People_ids"]),
+            json.dumps(data["Queue_Assignment"]),
+            json.dumps(data["Entry_time"]),
+            json.dumps(data["People_wt_time"]),
+            data["Processing_Status"],
+
+            json.dumps(data["x"]),
+            json.dumps(data["y"]),
+            json.dumps(data["w"]),
+            json.dumps(data["h"]),
+            json.dumps(data["accuracy"]),
             s3_url
         ))
 
         conn.commit()
-        cursor.close()
-
-        logger.info(f"✅ Data inserted for frame: {data['Frame_Id']}")
+        logger.info(f"✅ Data inserted/updated for frame_id={data['Frame_Id']}")
         return True
 
     except Exception as e:
         if conn:
             conn.rollback()
-        logger.error(f"❌ Failed to insert data: {e}")
+        logger.error(f"❌ DB insert failed for frame_id={data.get('Frame_Id')}: {e}")
         return False
 
     finally:
+        if cursor:
+            cursor.close()
         if conn:
-            pool.putconn(conn)   # ⬅ Return connection back to pool
+            pool.putconn(conn)
 
