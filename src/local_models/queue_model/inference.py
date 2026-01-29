@@ -65,8 +65,8 @@ def model_fn(model_dir: str):
     
     # Default to yolov8n.pt if not found
     if not model_path or not os.path.exists(model_path):
-        model_path = "yolov8n.pt"
-        logger.info("Using default model: yolov8n.pt")
+        model_path = "model.pt"
+        logger.info("Using default model: model.pt")
     
     try:
         yolo_model = YOLO(model_path)
