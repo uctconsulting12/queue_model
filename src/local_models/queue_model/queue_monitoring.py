@@ -1,5 +1,5 @@
 """
-Queue monitoring core - Enhanced with alert debouncing
+Queue monitoring core - Enhanced with alert debouncing and improved tracking
 Person detection, tracking, queue assignment, wait time calculation
 """
 
@@ -13,9 +13,74 @@ import cv2
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Configuration
-MAX_TRACKING_DISTANCE = 90.0
-STALE_TRACK_SECONDS = 8.0
+# Improved Tracking Configuration
+MAX_TRACKING_DISTANCE = 150.0  # Increased for better tracking
+STALE_TRACK_SECONDS = 15.0     # Increased to handle occlusions
+IOU_THRESHOLD = 0.3            # Minimum IoU for matching
+CONFIDENCE_THRESHOLD = 0.35    # Minimum detection confidence (lowered to reduce ID switching)
+MAX_MISSED_FRAMES = 10         # Allow temporary occlusions
+
+
+def calculate_iou(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
+    """
+    Calculate Intersection over Union (IoU) between two bounding boxes
+
+    Args:
+        box1, box2: Bounding boxes in format (x, y, w, h)
+
+    Returns:
+        IoU score between 0 and 1
+    """
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+
+    # Convert to corner coordinates
+    x1_max, y1_max = x1 + w1, y1 + h1
+    x2_max, y2_max = x2 + w2, y2 + h2
+
+    # Calculate intersection
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1_max, x2_max)
+    yi2 = min(y1_max, y2_max)
+
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+
+    # Calculate union
+    box1_area = w1 * h1
+    box2_area = w2 * h2
+    union_area = box1_area + box2_area - inter_area
+
+    # Calculate IoU
+    if union_area == 0:
+        return 0.0
+
+    return inter_area / union_area
+
+
+def calculate_bbox_similarity(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
+    """
+    Calculate bounding box size similarity
+
+    Args:
+        box1, box2: Bounding boxes in format (x, y, w, h)
+
+    Returns:
+        Similarity score between 0 and 1
+    """
+    _, _, w1, h1 = box1
+    _, _, w2, h2 = box2
+
+    area1 = w1 * h1
+    area2 = w2 * h2
+
+    if area1 == 0 or area2 == 0:
+        return 0.0
+
+    # Calculate area ratio (smaller/larger)
+    ratio = min(area1, area2) / max(area1, area2)
+
+    return ratio
 
 
 def seconds_to_hms(seconds: float) -> str:
@@ -38,79 +103,246 @@ def seconds_to_hms(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-class SimplePersonTracker:
-    """Simple person tracker with ID assignment"""
+class ImprovedPersonTracker:
+    """
+    Improved person tracker with multi-feature matching
+
+    Features:
+    - IoU-based matching for better bbox overlap detection
+    - Centroid distance tracking
+    - Bounding box size similarity
+    - Missed frames tolerance for handling occlusions
+    - Velocity-based position prediction
+    """
 
     def __init__(self):
         self.next_id = 1
         self.tracks: Dict[int, Dict[str, Any]] = {}
         self.removed_tracks: Dict[int, Dict[str, Any]] = {}
 
+    def _predict_position(self, track: Dict[str, Any]) -> Tuple[int, int]:
+        """
+        Predict next position based on velocity
+
+        Args:
+            track: Track dictionary with center and velocity
+
+        Returns:
+            Predicted (cx, cy) position
+        """
+        cx, cy = track['center']
+
+        # Use velocity if available
+        if 'velocity' in track:
+            vx, vy = track['velocity']
+            # Predict next position
+            pred_cx = int(cx + vx)
+            pred_cy = int(cy + vy)
+            return pred_cx, pred_cy
+
+        return cx, cy
+
+    def _calculate_match_score(self, detection_bbox: Tuple[int, int, int, int],
+                                 detection_center: Tuple[int, int],
+                                 track: Dict[str, Any]) -> float:
+        """
+        Calculate comprehensive match score between detection and track
+
+        Args:
+            detection_bbox: Detection bounding box (x, y, w, h)
+            detection_center: Detection center point (cx, cy)
+            track: Existing track dictionary
+
+        Returns:
+            Match score (higher is better, -1 means no match)
+        """
+        track_bbox = track['bbox']
+        pred_cx, pred_cy = self._predict_position(track)
+
+        # 1. Calculate IoU score (most important)
+        iou = calculate_iou(detection_bbox, track_bbox)
+
+        # 2. Calculate centroid distance (normalized)
+        dcx, dcy = detection_center
+        distance = np.sqrt((dcx - pred_cx) ** 2 + (dcy - pred_cy) ** 2)
+
+        # If distance is too large, reject immediately
+        if distance > MAX_TRACKING_DISTANCE:
+            return -1
+
+        # Normalize distance (0 = same position, 1 = max distance)
+        normalized_distance = 1.0 - min(distance / MAX_TRACKING_DISTANCE, 1.0)
+
+        # 3. Calculate bounding box size similarity
+        size_similarity = calculate_bbox_similarity(detection_bbox, track_bbox)
+
+        # 4. Combine scores with weights
+        # IoU is most important (0.5), then distance (0.3), then size (0.2)
+        match_score = (
+            0.5 * iou +
+            0.3 * normalized_distance +
+            0.2 * size_similarity
+        )
+
+        # Bonus for high IoU (strong bbox overlap)
+        if iou > IOU_THRESHOLD:
+            match_score += 0.1
+
+        return match_score
+
     def update(self, detections: List[Tuple[int, int, int, int, float]]) -> List[Dict[str, Any]]:
-        """Update tracker with new detections"""
+        """
+        Update tracker with new detections using improved matching
+
+        Args:
+            detections: List of (x, y, w, h, confidence) tuples
+
+        Returns:
+            List of tracked persons with IDs
+        """
         current_time = datetime.now()
         updated_tracks = []
         matched_track_ids = set()
+        matched_detection_indices = set()
 
-        # Match detections to existing tracks
-        for x, y, w, h, conf in detections:
+        # First pass: Match detections to existing tracks
+        # Build match score matrix
+        match_scores = []
+        for det_idx, (x, y, w, h, conf) in enumerate(detections):
+            if conf < CONFIDENCE_THRESHOLD:
+                continue
+
             cx, cy = x + w // 2, y + h // 2
-            best_match_id = None
-            best_distance = MAX_TRACKING_DISTANCE
+            detection_bbox = (x, y, w, h)
+            detection_center = (cx, cy)
 
+            det_scores = []
             for track_id, track in self.tracks.items():
                 if track_id in matched_track_ids:
+                    det_scores.append(-1)
                     continue
 
-                tx, ty = track['center']
-                distance = np.sqrt((cx - tx) ** 2 + (cy - ty) ** 2)
+                score = self._calculate_match_score(detection_bbox, detection_center, track)
+                det_scores.append(score)
 
-                if distance < best_distance:
-                    best_distance = distance
-                    best_match_id = track_id
+            match_scores.append((det_idx, det_scores))
 
-            if best_match_id:
-                self.tracks[best_match_id].update({
-                    'bbox': (x, y, w, h),
-                    'center': (cx, cy),
-                    'confidence': conf,
-                    'last_seen': current_time
-                })
-                matched_track_ids.add(best_match_id)
+        # Match using Hungarian-like greedy approach (best scores first)
+        # Sort by best match score
+        all_matches = []
+        for det_idx, scores in match_scores:
+            if not scores:
+                continue
+            track_ids = list(self.tracks.keys())
+            for i, score in enumerate(scores):
+                if score > 0:  # Valid match
+                    all_matches.append((score, det_idx, track_ids[i]))
+
+        # Sort by score (descending)
+        all_matches.sort(reverse=True, key=lambda x: x[0])
+
+        # Assign matches greedily
+        for score, det_idx, track_id in all_matches:
+            if det_idx in matched_detection_indices or track_id in matched_track_ids:
+                continue
+
+            x, y, w, h, conf = detections[det_idx]
+            cx, cy = x + w // 2, y + h // 2
+
+            # Update track
+            old_center = self.tracks[track_id]['center']
+
+            # Calculate velocity
+            vx = cx - old_center[0]
+            vy = cy - old_center[1]
+
+            # Smooth velocity with exponential moving average
+            if 'velocity' in self.tracks[track_id]:
+                old_vx, old_vy = self.tracks[track_id]['velocity']
+                vx = 0.7 * old_vx + 0.3 * vx  # Smoothing factor
+                vy = 0.7 * old_vy + 0.3 * vy
+
+            self.tracks[track_id].update({
+                'bbox': (x, y, w, h),
+                'center': (cx, cy),
+                'velocity': (vx, vy),
+                'confidence': conf,
+                'last_seen': current_time,
+                'missed_frames': 0  # Reset missed frames counter
+            })
+
+            matched_track_ids.add(track_id)
+            matched_detection_indices.add(det_idx)
+
+            updated_tracks.append({
+                'person_id': track_id,
+                'bbox': (x, y, w, h),
+                'confidence': conf,
+                'entry_time': self.tracks[track_id].get('entry_time', current_time)
+            })
+
+        # Second pass: Create new tracks for unmatched detections
+        for det_idx, (x, y, w, h, conf) in enumerate(detections):
+            if det_idx in matched_detection_indices:
+                continue
+
+            if conf < CONFIDENCE_THRESHOLD:
+                continue
+
+            cx, cy = x + w // 2, y + h // 2
+            person_id = self.next_id
+            self.next_id += 1
+
+            self.tracks[person_id] = {
+                'bbox': (x, y, w, h),
+                'center': (cx, cy),
+                'velocity': (0, 0),
+                'confidence': conf,
+                'entry_time': current_time,
+                'last_seen': current_time,
+                'missed_frames': 0
+            }
+
+            updated_tracks.append({
+                'person_id': person_id,
+                'bbox': (x, y, w, h),
+                'confidence': conf,
+                'entry_time': current_time
+            })
+
+        # Third pass: Handle unmatched tracks (increment missed frames)
+        # IMPORTANT: Also add them to updated_tracks so they appear in People_ids
+        for track_id in list(self.tracks.keys()):
+            if track_id not in matched_track_ids:
+                self.tracks[track_id]['missed_frames'] = self.tracks[track_id].get('missed_frames', 0) + 1
+
+                # Add to updated_tracks so person still appears in output
+                # Use last known position/bbox
+                track = self.tracks[track_id]
                 updated_tracks.append({
-                    'person_id': best_match_id,
-                    'bbox': (x, y, w, h),
-                    'confidence': conf,
-                    'entry_time': self.tracks[best_match_id].get('entry_time', current_time)
-                })
-            else:
-                person_id = self.next_id
-                self.next_id += 1
-
-                self.tracks[person_id] = {
-                    'bbox': (x, y, w, h),
-                    'center': (cx, cy),
-                    'confidence': conf,
-                    'entry_time': current_time,
-                    'last_seen': current_time
-                }
-
-                updated_tracks.append({
-                    'person_id': person_id,
-                    'bbox': (x, y, w, h),
-                    'confidence': conf,
-                    'entry_time': current_time
+                    'person_id': track_id,
+                    'bbox': track['bbox'],
+                    'confidence': track['confidence'],
+                    'entry_time': track.get('entry_time', current_time)
                 })
 
         # Remove stale tracks
         stale_ids = []
         for track_id, track in self.tracks.items():
+            # Remove if too many missed frames OR too much time passed
+            missed_frames = track.get('missed_frames', 0)
             time_since_seen = (current_time - track['last_seen']).total_seconds()
-            if time_since_seen > STALE_TRACK_SECONDS:
+
+            if missed_frames > MAX_MISSED_FRAMES or time_since_seen > STALE_TRACK_SECONDS:
                 stale_ids.append(track_id)
 
         for track_id in stale_ids:
             self.removed_tracks[track_id] = self.tracks.pop(track_id)
+            logger.debug(f"Removed track ID {track_id} (missed_frames: {self.removed_tracks[track_id].get('missed_frames', 0)})")
+
+        # CRITICAL: Sort by person_id to ensure consistent order across frames
+        # This prevents arrays from mismatching when people are added/removed
+        updated_tracks.sort(key=lambda x: x['person_id'])
 
         return updated_tracks
 
@@ -135,7 +367,7 @@ class QueueMonitoringSystem:
         self.max_queue_wait = camera_config.get("max_waiting_time_queue", 300)
         self.max_front_wait = camera_config.get("max_waiting_time_front_person", 120)
 
-        self.tracker = SimplePersonTracker()
+        self.tracker = ImprovedPersonTracker()
         self.entry_counters = {q["queue_id"]: 0 for q in self.queues}
         self.exit_counters = {q["queue_id"]: 0 for q in self.queues}
 
