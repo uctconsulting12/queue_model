@@ -265,11 +265,15 @@ class QueueMonitoringSystem:
 
         Returns actual status AND whether a new alert should be triggered.
         Alert is only triggered once when problem first detected, and resets when resolved.
+
+        Enhanced Status Format:
+        - If no alerts: returns empty list []
+        - If alerts: returns list with "Queue Name: STATUS" for queues with Should_Alert=True
         """
         lengths = []
         front_wait_times = []
         avg_wait_times = []
-        statuses = []
+        raw_statuses = []  # Internal status tracking
         alert_states = []
 
         for queue in self.queues:
@@ -282,7 +286,7 @@ class QueueMonitoringSystem:
                 # Queue is empty - reset everything
                 front_wait_times.append("00:00:00")
                 avg_wait_times.append("00:00:00")
-                statuses.append("OK")
+                raw_statuses.append("OK")
                 alert_states.append(False)
                 self.queue_alert_active[queue_id] = False
             else:
@@ -307,7 +311,7 @@ class QueueMonitoringSystem:
                 else:
                     actual_status = "OK"
 
-                statuses.append(actual_status)
+                raw_statuses.append(actual_status)
 
                 # FIXED: Explicit handling of all state transitions
                 should_alert = False  # Default: no new alert
@@ -330,13 +334,27 @@ class QueueMonitoringSystem:
                         # Problem continues - don't re-alert (explicitly)
                         should_alert = False
 
+                # CRITICAL: Always append to alert_states for non-empty queues
                 alert_states.append(should_alert)
+
+        # Build enhanced user-friendly status list
+        enhanced_statuses = []
+        for i, queue in enumerate(self.queues):
+            # Only include queues with Should_Alert=True
+            if alert_states[i]:
+                queue_name = queue['name']
+                status_type = raw_statuses[i]
+                enhanced_statuses.append(f"{queue_name}: {status_type}")
+
+        # If no alerts, return [""] instead of []
+        if not enhanced_statuses:
+            enhanced_statuses = [""]
 
         return {
             'lengths': lengths,
             'front_wait_times': front_wait_times,
             'avg_wait_times': avg_wait_times,
-            'statuses': statuses,
+            'statuses': enhanced_statuses,  # Enhanced format: [""] if no alerts, or ["Queue X: STATUS"] for alerts
             'should_alert': alert_states
         }
 
