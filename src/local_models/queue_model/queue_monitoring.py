@@ -20,6 +20,11 @@ IOU_THRESHOLD = 0.3            # Minimum IoU for matching
 CONFIDENCE_THRESHOLD = 0.35    # Minimum detection confidence (lowered to reduce ID switching)
 MAX_MISSED_FRAMES = 10         # Allow temporary occlusions
 
+# Re-identification Configuration
+REID_WINDOW_SECONDS = 300.0    # Time window to check for returning persons (5 minutes)
+REID_POSITION_THRESHOLD = 200.0  # Maximum distance to consider same person
+REID_SIZE_SIMILARITY = 0.7     # Minimum bbox size similarity
+
 
 def calculate_iou(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
     """
@@ -103,9 +108,52 @@ def seconds_to_hms(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def add_customer_count_overlay(frame: np.ndarray, total_customers: int) -> np.ndarray:
+    """
+    Add customer count overlay to top-right corner of frame
+
+    Args:
+        frame: Input frame
+        total_customers: Total number of unique customers visited
+
+    Returns:
+        Frame with overlay
+    """
+    frame_height, frame_width = frame.shape[:2]
+
+    # Create text
+    customer_text = f"Total Customers Visited: {total_customers}"
+
+    # Get text size for background
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.8
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(customer_text, font, font_scale, thickness)
+
+    # Position at top-right corner with padding
+    padding = 10
+    x = frame_width - text_width - padding
+    y = text_height + padding
+
+    # Draw semi-transparent background
+    overlay = frame.copy()
+    bg_x1 = x - padding
+    bg_y1 = y - text_height - padding
+    bg_x2 = frame_width
+    bg_y2 = y + baseline + padding
+
+    cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+
+    # Draw text
+    cv2.putText(frame, customer_text, (x, y), font, font_scale, (0, 255, 0), thickness, cv2.LINE_AA)
+
+    return frame
+
+
 class ImprovedPersonTracker:
     """
-    Improved person tracker with multi-feature matching
+    Improved person tracker with multi-feature matching and re-identification
 
     Features:
     - IoU-based matching for better bbox overlap detection
@@ -113,12 +161,20 @@ class ImprovedPersonTracker:
     - Bounding box size similarity
     - Missed frames tolerance for handling occlusions
     - Velocity-based position prediction
+    - Re-identification for returning persons
+    - Permanent unique person tracking
     """
 
     def __init__(self):
         self.next_id = 1
         self.tracks: Dict[int, Dict[str, Any]] = {}
         self.removed_tracks: Dict[int, Dict[str, Any]] = {}
+
+        # NEW: Track ID mapping for re-identified persons
+        self.id_mapping: Dict[int, int] = {}  # Maps new_id -> original_id
+
+        # NEW: Permanent set of all unique canonical IDs ever seen
+        self.all_unique_persons: set = set()
 
     def _predict_position(self, track: Dict[str, Any]) -> Tuple[int, int]:
         """
@@ -190,9 +246,64 @@ class ImprovedPersonTracker:
 
         return match_score
 
+    def _check_reid_match(self, detection_bbox: Tuple[int, int, int, int],
+                          detection_center: Tuple[int, int],
+                          current_time: datetime) -> Optional[int]:
+        """
+        Check if detection matches a recently removed track (re-identification)
+
+        Args:
+            detection_bbox: Detection bounding box (x, y, w, h)
+            detection_center: Detection center point (cx, cy)
+            current_time: Current timestamp
+
+        Returns:
+            Original track ID if match found, None otherwise
+        """
+        dcx, dcy = detection_center
+        best_match_id = None
+        best_match_score = 0.0
+
+        # Check recently removed tracks
+        for track_id, track in list(self.removed_tracks.items()):
+            # Only check tracks removed recently
+            time_since_removal = (current_time - track['last_seen']).total_seconds()
+            if time_since_removal > REID_WINDOW_SECONDS:
+                continue
+
+            # Calculate position distance
+            tcx, tcy = track['center']
+            distance = np.sqrt((dcx - tcx) ** 2 + (dcy - tcy) ** 2)
+
+            # Skip if too far
+            if distance > REID_POSITION_THRESHOLD:
+                continue
+
+            # Calculate size similarity
+            size_sim = calculate_bbox_similarity(detection_bbox, track['bbox'])
+
+            # Skip if size changed too much
+            if size_sim < REID_SIZE_SIMILARITY:
+                continue
+
+            # Calculate combined score (distance + size)
+            normalized_distance = 1.0 - min(distance / REID_POSITION_THRESHOLD, 1.0)
+            score = 0.6 * normalized_distance + 0.4 * size_sim
+
+            if score > best_match_score:
+                best_match_score = score
+                best_match_id = track_id
+
+        # Require minimum confidence for re-identification
+        if best_match_score > 0.7:
+            logger.info(f"Re-identified person: Track ID {best_match_id} (score: {best_match_score:.2f})")
+            return best_match_id
+
+        return None
+
     def update(self, detections: List[Tuple[int, int, int, int, float]]) -> List[Dict[str, Any]]:
         """
-        Update tracker with new detections using improved matching
+        Update tracker with new detections using improved matching and re-identification
 
         Args:
             detections: List of (x, y, w, h, confidence) tuples
@@ -282,6 +393,7 @@ class ImprovedPersonTracker:
             })
 
         # Second pass: Create new tracks for unmatched detections
+        # BUT FIRST check for re-identification
         for det_idx, (x, y, w, h, conf) in enumerate(detections):
             if det_idx in matched_detection_indices:
                 continue
@@ -290,25 +402,68 @@ class ImprovedPersonTracker:
                 continue
 
             cx, cy = x + w // 2, y + h // 2
-            person_id = self.next_id
-            self.next_id += 1
+            detection_bbox = (x, y, w, h)
+            detection_center = (cx, cy)
 
-            self.tracks[person_id] = {
-                'bbox': (x, y, w, h),
-                'center': (cx, cy),
-                'velocity': (0, 0),
-                'confidence': conf,
-                'entry_time': current_time,
-                'last_seen': current_time,
-                'missed_frames': 0
-            }
+            # NEW: Check if this matches a recently removed track (re-identification)
+            reid_match_id = self._check_reid_match(detection_bbox, detection_center, current_time)
 
-            updated_tracks.append({
-                'person_id': person_id,
-                'bbox': (x, y, w, h),
-                'confidence': conf,
-                'entry_time': current_time
-            })
+            if reid_match_id:
+                # Re-identified! Restore the old track with same ID
+                old_track = self.removed_tracks.pop(reid_match_id)
+
+                # Create new track ID but map it to original
+                new_id = self.next_id
+                self.next_id += 1
+
+                # Store mapping: new_id -> original_id
+                self.id_mapping[new_id] = reid_match_id
+
+                # Restore track with new tracking data but keep original entry time
+                self.tracks[new_id] = {
+                    'bbox': (x, y, w, h),
+                    'center': (cx, cy),
+                    'velocity': (0, 0),
+                    'confidence': conf,
+                    'entry_time': old_track.get('entry_time', current_time),  # Keep original entry time
+                    'last_seen': current_time,
+                    'missed_frames': 0,
+                    'original_id': reid_match_id  # Store original ID for reference
+                }
+
+                # NEW: Add canonical ID to permanent set (should already be there, but ensure)
+                self.all_unique_persons.add(reid_match_id)
+
+                updated_tracks.append({
+                    'person_id': new_id,
+                    'bbox': (x, y, w, h),
+                    'confidence': conf,
+                    'entry_time': old_track.get('entry_time', current_time)
+                })
+            else:
+                # Truly new person
+                person_id = self.next_id
+                self.next_id += 1
+
+                self.tracks[person_id] = {
+                    'bbox': (x, y, w, h),
+                    'center': (cx, cy),
+                    'velocity': (0, 0),
+                    'confidence': conf,
+                    'entry_time': current_time,
+                    'last_seen': current_time,
+                    'missed_frames': 0
+                }
+
+                # NEW: Add to permanent unique persons set
+                self.all_unique_persons.add(person_id)
+
+                updated_tracks.append({
+                    'person_id': person_id,
+                    'bbox': (x, y, w, h),
+                    'confidence': conf,
+                    'entry_time': current_time
+                })
 
         # Third pass: Handle unmatched tracks (increment missed frames)
         # IMPORTANT: Also add them to updated_tracks so they appear in People_ids
@@ -337,8 +492,26 @@ class ImprovedPersonTracker:
                 stale_ids.append(track_id)
 
         for track_id in stale_ids:
+            # NEW: Before removing, add canonical ID to permanent set
+            canonical_id = self.get_canonical_id(track_id)
+            self.all_unique_persons.add(canonical_id)
+
             self.removed_tracks[track_id] = self.tracks.pop(track_id)
-            logger.debug(f"Removed track ID {track_id} (missed_frames: {self.removed_tracks[track_id].get('missed_frames', 0)})")
+            logger.debug(f"Removed track ID {track_id} (canonical: {canonical_id}, missed_frames: {self.removed_tracks[track_id].get('missed_frames', 0)})")
+
+        # Clean up old removed tracks (older than REID_WINDOW_SECONDS)
+        old_removed = []
+        for track_id, track in self.removed_tracks.items():
+            time_since_removal = (current_time - track['last_seen']).total_seconds()
+            if time_since_removal > REID_WINDOW_SECONDS:
+                old_removed.append(track_id)
+
+        for track_id in old_removed:
+            # NEW: Ensure canonical ID is in permanent set before deleting
+            canonical_id = self.get_canonical_id(track_id)
+            self.all_unique_persons.add(canonical_id)
+
+            self.removed_tracks.pop(track_id)
 
         # CRITICAL: Sort by person_id to ensure consistent order across frames
         # This prevents arrays from mismatching when people are added/removed
@@ -346,16 +519,34 @@ class ImprovedPersonTracker:
 
         return updated_tracks
 
+    def get_canonical_id(self, track_id: int) -> int:
+        """
+        Get the canonical (original) ID for a track, following ID mappings
+
+        Args:
+            track_id: Current track ID
+
+        Returns:
+            Original/canonical ID
+        """
+        # Follow the mapping chain to get original ID
+        canonical_id = track_id
+        while canonical_id in self.id_mapping:
+            canonical_id = self.id_mapping[canonical_id]
+        return canonical_id
+
     def get_stats(self) -> Dict[str, Any]:
+        # Use the permanent set for unique count
         return {
             "active_tracks": len(self.tracks),
             "total_tracks_created": self.next_id - 1,
-            "removed_tracks": len(self.removed_tracks)
+            "removed_tracks": len(self.removed_tracks),
+            "unique_persons": len(self.all_unique_persons)  # PERMANENT unique count
         }
 
 
 class QueueMonitoringSystem:
-    """Queue monitoring system with alert debouncing"""
+    """Queue monitoring system with alert debouncing and re-identification"""
 
     def __init__(self, model, camera_config: Dict[str, Any]):
         self.model = model
@@ -373,6 +564,15 @@ class QueueMonitoringSystem:
 
         # NEW: Alert debouncing - tracks if alert is currently active for each queue
         self.queue_alert_active = {q["queue_id"]: False for q in self.queues}
+
+        # NEW: Track which CANONICAL persons have been counted in each queue
+        self.queue_visitors_seen = {q["queue_id"]: set() for q in self.queues}
+
+        # NEW: Per-queue customer visited counters (unique only)
+        self.queue_customer_visited = {q["queue_id"]: 0 for q in self.queues}
+
+        # NEW: Total customer visited counter (unique persons who entered ANY ROI only)
+        self.total_customer_visited = 0
 
         self.frame_count = 0
 
@@ -395,7 +595,7 @@ class QueueMonitoringSystem:
         return None
 
     def process_frame(self, frame: np.ndarray, return_annotated: bool = True) -> Dict[str, Any]:
-        """Process frame with alert debouncing"""
+        """Process frame with alert debouncing and re-identification"""
         start_time = time.time()
         self.frame_count += 1
         current_time = datetime.now()
@@ -429,6 +629,28 @@ class QueueMonitoringSystem:
             'wait_times': [], 'bboxes': [], 'confidences': []
         }
 
+        # NEW: Update per-queue customer counts using CANONICAL IDs
+        for person in tracked_persons:
+            queue_id = self._assign_to_queue(person)
+            person_id = person['person_id']
+
+            # Get canonical ID (original ID even if re-identified)
+            canonical_id = self.tracker.get_canonical_id(person_id)
+
+            # If person is in a queue AND hasn't been counted for that queue yet
+            if queue_id and canonical_id not in self.queue_visitors_seen[queue_id]:
+                self.queue_visitors_seen[queue_id].add(canonical_id)
+                self.queue_customer_visited[queue_id] += 1
+                logger.info(f"New unique customer {canonical_id} (current ID: {person_id}) entered Queue {queue_id}")
+
+        # UPDATED: Total customer visited = unique persons who entered ANY ROI region
+        # Count all unique canonical IDs that have been in any queue
+        all_unique_roi_visitors = set()
+        for queue_id, visitors in self.queue_visitors_seen.items():
+            all_unique_roi_visitors.update(visitors)
+
+        self.total_customer_visited = len(all_unique_roi_visitors)
+
         for person in tracked_persons:
             queue_id = self._assign_to_queue(person)
             person_id = person['person_id']
@@ -439,14 +661,14 @@ class QueueMonitoringSystem:
             person_data['ids'].append(person_id)
             person_data['queue_ids'].append(queue_id if queue_id else 0)
             person_data['entry_times'].append(entry_time.strftime("%H:%M:%S"))
-            person_data['wait_times'].append(seconds_to_hms(wait_time_seconds))  # Changed to HH:MM:SS
+            person_data['wait_times'].append(seconds_to_hms(wait_time_seconds))
             person_data['bboxes'].append(person['bbox'])
             person_data['confidences'].append(person['confidence'])
 
             if queue_id:
                 queue_assignments[queue_id].append({
                     'person_id': person_id,
-                    'wait_time': wait_time_minutes,  # Keep in minutes for internal calculations
+                    'wait_time': wait_time_minutes,
                     'bbox': person['bbox']
                 })
 
@@ -462,7 +684,7 @@ class QueueMonitoringSystem:
 
         processing_time = time.time() - start_time
 
-        # Build result - NOW INCLUDES Should_Alert field
+        # Build result
         result = {
             "Frame_Id": str(int(time.time() * 1000)),
             "Time_stamp": timestamp,
@@ -472,7 +694,9 @@ class QueueMonitoringSystem:
             "Front_person_Wt": queue_stats['front_wait_times'],
             "Average_wt_time": queue_stats['avg_wait_times'],
             "Status": queue_stats['statuses'],
-            "Should_Alert": queue_stats['should_alert'],  # NEW: Alert debouncing flag
+            "Total_Customer_Visited": self.total_customer_visited,  # UNIQUE count - only ROI visitors
+            "Queue_Customer_Visited": [self.queue_customer_visited[q["queue_id"]] for q in self.queues],
+            "Should_Alert": queue_stats['should_alert'],
             "Total_people_detected": len(tracked_persons),
             "People_ids": person_data['ids'],
             "Queue_Assignment": person_data['queue_ids'],
@@ -493,19 +717,11 @@ class QueueMonitoringSystem:
         return result
 
     def _calculate_queue_stats(self, queue_assignments: Dict[int, List]) -> Dict[str, List]:
-        """Calculate queue statistics with alert debouncing
-
-        Returns actual status AND whether a new alert should be triggered.
-        Alert is only triggered once when problem first detected, and resets when resolved.
-
-        Enhanced Status Format:
-        - If no alerts: returns empty list []
-        - If alerts: returns list with "Queue Name: STATUS" for queues with Should_Alert=True
-        """
+        """Calculate queue statistics with alert debouncing"""
         lengths = []
         front_wait_times = []
         avg_wait_times = []
-        raw_statuses = []  # Internal status tracking
+        raw_statuses = []
         alert_states = []
 
         for queue in self.queues:
@@ -515,17 +731,15 @@ class QueueMonitoringSystem:
             lengths.append(length)
 
             if length == 0:
-                # Queue is empty - reset everything
                 front_wait_times.append("00:00:00")
                 avg_wait_times.append("00:00:00")
                 raw_statuses.append("OK")
                 alert_states.append(False)
                 self.queue_alert_active[queue_id] = False
             else:
-                # Calculate wait times (in minutes for internal use)
                 persons_sorted = sorted(persons, key=lambda p: p['bbox'][1])
                 front_person = persons_sorted[0]
-                front_wait = front_person['wait_time']  # in minutes
+                front_wait = front_person['wait_time']
                 front_wait_seconds = front_wait * 60.0
                 front_wait_times.append(seconds_to_hms(front_wait_seconds))
 
@@ -533,7 +747,6 @@ class QueueMonitoringSystem:
                 avg_wait_seconds = avg_wait * 60.0
                 avg_wait_times.append(seconds_to_hms(avg_wait_seconds))
 
-                # Determine ACTUAL status (always reflects current reality)
                 if length > self.max_length:
                     actual_status = "QUEUE_TOO_LONG"
                 elif front_wait > (self.max_front_wait / 60.0):
@@ -545,40 +758,27 @@ class QueueMonitoringSystem:
 
                 raw_statuses.append(actual_status)
 
-                # FIXED: Explicit handling of all state transitions
-                should_alert = False  # Default: no new alert
+                should_alert = False
 
                 if actual_status == "OK":
-                    # No problem detected
                     if self.queue_alert_active[queue_id]:
-                        # Problem was resolved - clear alert state
                         self.queue_alert_active[queue_id] = False
                         logger.info(f"Alert cleared for Queue {queue_id}")
-                    # should_alert remains False (explicitly)
                 else:
-                    # Problem detected
                     if not self.queue_alert_active[queue_id]:
-                        # NEW problem - trigger alert
                         should_alert = True
                         self.queue_alert_active[queue_id] = True
                         logger.info(f"Alert triggered for Queue {queue_id}: {actual_status}")
-                    else:
-                        # Problem continues - don't re-alert (explicitly)
-                        should_alert = False
 
-                # CRITICAL: Always append to alert_states for non-empty queues
                 alert_states.append(should_alert)
 
-        # Build enhanced user-friendly status list
         enhanced_statuses = []
         for i, queue in enumerate(self.queues):
-            # Only include queues with Should_Alert=True
             if alert_states[i]:
                 queue_name = queue['name']
                 status_type = raw_statuses[i]
                 enhanced_statuses.append(f"{queue_name}: {status_type}")
 
-        # If no alerts, return [""] instead of []
         if not enhanced_statuses:
             enhanced_statuses = [""]
 
@@ -586,7 +786,7 @@ class QueueMonitoringSystem:
             'lengths': lengths,
             'front_wait_times': front_wait_times,
             'avg_wait_times': avg_wait_times,
-            'statuses': enhanced_statuses,  # Enhanced format: [""] if no alerts, or ["Queue X: STATUS"] for alerts
+            'statuses': enhanced_statuses,
             'should_alert': alert_states
         }
 
@@ -830,6 +1030,12 @@ class QueueMonitoringSystem:
             except Exception as e:
                 logger.warning(f"Failed to add system info: {e}")
 
+            # Add customer count overlay to top-right corner
+            try:
+                annotated = add_customer_count_overlay(annotated, self.total_customer_visited)
+            except Exception as e:
+                logger.warning(f"Failed to add customer count overlay: {e}")
+
             return annotated
 
         except Exception as e:
@@ -837,7 +1043,7 @@ class QueueMonitoringSystem:
             return frame.copy()
 
     def get_system_stats(self) -> Dict[str, Any]:
-        """Get system statistics including alert states"""
+        """Get system statistics including unique customer counts"""
         return {
             "camera_id": self.camid,
             "frames_processed": self.frame_count,
@@ -845,5 +1051,7 @@ class QueueMonitoringSystem:
             "tracker_stats": self.tracker.get_stats(),
             "entry_counters": self.entry_counters,
             "exit_counters": self.exit_counters,
-            "alert_states": self.queue_alert_active  # NEW: Show which queues have active alerts
+            "alert_states": self.queue_alert_active,
+            "total_customer_visited": self.total_customer_visited,
+            "queue_customer_visited": self.queue_customer_visited
         }

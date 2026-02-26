@@ -137,6 +137,8 @@ def insert_data(data, s3_url):
     Assumes:
     - Should_Alert is JSONB
     - frame_id is UNIQUE
+    - Total_Customer_Visited is INTEGER
+    - Queue_Customer_Visited is JSONB (array)
     """
 
     conn = None
@@ -161,6 +163,8 @@ def insert_data(data, s3_url):
                 Should_Alert,
                 average_wt_time,
                 status,
+                total_customer_visited,
+                queue_customer_visited,
                 total_people_detected,
                 people_ids,
                 queue_assignment,
@@ -177,8 +181,8 @@ def insert_data(data, s3_url):
             VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s,
                 %s, %s, %s, %s,
-                %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s
             )
@@ -191,6 +195,8 @@ def insert_data(data, s3_url):
                 Should_Alert = EXCLUDED.Should_Alert,
                 average_wt_time = EXCLUDED.average_wt_time,
                 status = EXCLUDED.status,
+                total_customer_visited = EXCLUDED.total_customer_visited,
+                queue_customer_visited = EXCLUDED.queue_customer_visited,
                 total_people_detected = EXCLUDED.total_people_detected,
                 people_ids = EXCLUDED.people_ids,
                 queue_assignment = EXCLUDED.queue_assignment,
@@ -220,6 +226,9 @@ def insert_data(data, s3_url):
             json.dumps(data["Average_wt_time"]),
             json.dumps(data["Status"]),
 
+            data["Total_Customer_Visited"],        # ✅ NEW: Integer field
+            json.dumps(data["Queue_Customer_Visited"]),  # ✅ NEW: ARRAY → JSONB
+
             data["Total_people_detected"],
             json.dumps(data["People_ids"]),
             json.dumps(data["Queue_Assignment"]),
@@ -236,7 +245,7 @@ def insert_data(data, s3_url):
         ))
 
         conn.commit()
-        logger.info(f"✅ Data inserted/updated for frame_id={data['Frame_Id']}")
+        logger.info(f"✅ Successfully inserted/updated frame {data['Frame_Id']}")
         return True
 
     except Exception as e:
