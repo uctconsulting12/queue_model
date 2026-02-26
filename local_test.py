@@ -2,6 +2,7 @@
 """
 Local test file - Manages database fetching, roi.json caching, and inference
 Same invocation style as AWS version
+Enhanced with customer visit tracking display
 """
 
 import os
@@ -17,15 +18,15 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Import modules
-from db_manager import get_camera_config, check_for_updates, sync_all_cameras, load_roi_cache
-from inference import model_fn, input_fn, predict_fn, output_fn
+from src.local_models.queue_model.db_manager import get_camera_config, check_for_updates, sync_all_cameras, load_roi_cache
+from src.local_models.queue_model.inference import model_fn, input_fn, predict_fn, output_fn
 
 # Configuration
-VIDEO_PATH = r"E:\UTC project\utc\cctv\CCTV_Project\Queue_Monitering_V2\Video\Vid.mp4"  # Change this to your video path
-CAMERA_ID = 8621
+VIDEO_PATH = r"E:\UTC project\CCTV_Project\Video\Vid.mp4"  # Change this to your video path
+CAMERA_ID = 3135
 USER_ID = 4
 ORG_ID = 4
-CHECK_UPDATE_INTERVAL = 120  # Check for DB updates every 30 seconds
+CHECK_UPDATE_INTERVAL = 120  # Check for DB updates every 120 seconds
 
 
 def frame_to_b64(frame: np.ndarray) -> str:
@@ -43,13 +44,46 @@ def b64_to_frame(b64_str: str) -> np.ndarray:
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
 
+def convert_normalized_to_absolute_coords(camera_config: Dict[str, Any], frame_width: int, frame_height: int) -> Dict[str, Any]:
+    """
+    Convert normalized coordinates (0-1) to absolute pixel coordinates
+
+    Args:
+        camera_config: Camera configuration with normalized coordinates
+        frame_width: Frame width in pixels
+        frame_height: Frame height in pixels
+
+    Returns:
+        Updated camera config with absolute coordinates
+    """
+    config_copy = camera_config.copy()
+
+    if 'queues_coordinates' in config_copy:
+        for queue in config_copy['queues_coordinates']:
+            if 'rect' in queue and isinstance(queue['rect'], dict):
+                rect = queue['rect']
+
+                # Check if coordinates are normalized (between 0 and 1)
+                if all(0 <= rect.get(k, 2) <= 1 for k in ['x', 'y', 'w', 'h']):
+                    # Convert to absolute coordinates
+                    queue['rect'] = {
+                        'x': int(rect['x'] * frame_width),
+                        'y': int(rect['y'] * frame_height),
+                        'w': int(rect['w'] * frame_width),
+                        'h': int(rect['h'] * frame_height)
+                    }
+                    logger.debug(f"Converted Queue {queue['queue_id']} coordinates to absolute: {queue['rect']}")
+
+    return config_copy
+
+
 def main():
     """Main test function"""
-    
+
     print("=" * 70)
     print("Queue Monitoring System - Local Test")
     print("=" * 70)
-    
+
     # Step 1: Load YOLO model
     print("\n[1/4] Loading YOLO model...")
     try:
@@ -59,7 +93,7 @@ def main():
     except Exception as e:
         print(f"✗ Failed to load model: {e}")
         return
-    
+
     # Step 2: Fetch camera config from database
     print(f"\n[2/4] Fetching camera {CAMERA_ID} configuration from database...")
     try:
@@ -69,36 +103,45 @@ def main():
             print("\nTip: Check if camera exists in database or run sync:")
             print("  python -c 'from db_manager import sync_all_cameras; sync_all_cameras()'")
             return
-        
+
         print(f"✓ Camera config loaded:")
         print(f"  - Region: {camera_config['region_name']}")
         print(f"  - Queues: {camera_config['number_of_queues']}")
         print(f"  - ROI coordinates cached in roi.json")
-        
+
     except Exception as e:
         print(f"✗ Failed to fetch config: {e}")
         import traceback
         traceback.print_exc()
         return
-    
+
     # Step 3: Open video
     print(f"\n[3/4] Opening video: {VIDEO_PATH}")
     if not os.path.exists(VIDEO_PATH):
         print(f"✗ Video file not found: {VIDEO_PATH}")
         print("\nPlease set VIDEO_PATH in local_test.py to your video file")
         return
-    
+
     cap = cv2.VideoCapture(VIDEO_PATH)
     if not cap.isOpened():
         print(f"✗ Cannot open video: {VIDEO_PATH}")
         return
-    
+
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
     print(f"✓ Video opened successfully")
+    print(f"  - Resolution: {frame_width}x{frame_height}")
     print(f"  - Total frames: {total_frames}")
     print(f"  - FPS: {fps}")
-    
+
+    # IMPORTANT: Convert normalized coordinates to absolute coordinates
+    print(f"\n[3.5/4] Converting normalized coordinates to absolute...")
+    camera_config = convert_normalized_to_absolute_coords(camera_config, frame_width, frame_height)
+    print("✓ Coordinates converted")
+
     # Step 4: Process video frames
     print(f"\n[4/4] Processing video frames...")
     print("\nControls:")
@@ -106,32 +149,34 @@ def main():
     print("  P - Pause/Resume")
     print("  S - Save screenshot")
     print("  U - Force update from database")
+    print("  D - Display stats")
     print()
-    
+
     frame_count = 0
     last_update_check = time.time()
     paused = False
-    
+    last_result = None
+
     while True:
         if not paused:
             ret, frame = cap.read()
             if not ret:
                 print("\n✓ End of video reached")
                 break
-            
+
             frame_count += 1
-            
+
             # Check for database updates periodically
             current_time = time.time()
             if current_time - last_update_check > CHECK_UPDATE_INTERVAL:
                 logger.info("Checking for database updates...")
                 if check_for_updates(CAMERA_ID):
                     logger.info("Database updates detected! Reloading config...")
-                    camera_config = get_camera_config(CAMERA_ID, force_refresh=True)
-                    # Note: In production, you'd recreate monitoring system here
+                    new_config = get_camera_config(CAMERA_ID, force_refresh=True)
+                    camera_config = convert_normalized_to_absolute_coords(new_config, frame_width, frame_height)
                     logger.info("Config reloaded from database and cached to roi.json")
                 last_update_check = current_time
-            
+
             # Prepare payload (same as AWS SageMaker invocation)
             payload = {
                 "camid": CAMERA_ID,
@@ -141,58 +186,42 @@ def main():
                 "camera_config": camera_config,
                 "return_annotated": True
             }
-            
+
             # Invoke inference pipeline (same as AWS)
             try:
                 # Step 1: Parse input
                 input_data = input_fn(json.dumps(payload), "application/json")
-                
+
                 # Step 2: Run prediction
                 result = predict_fn(input_data, model)
-                
+
                 # Step 3: Format output
                 output_json = output_fn(result, "application/json")
-                
+
                 # Parse result
                 result = json.loads(output_json)
-                
+                last_result = result
+
             except Exception as e:
                 logger.error(f"Inference failed: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
-            
+
             # Display result
             if "Annotated_Frame" in result and result["Annotated_Frame"]:
                 display_frame = b64_to_frame(result["Annotated_Frame"])
             else:
                 display_frame = frame
-            
-            # Add info overlay
-            '''y_offset = 30
-            cv2.putText(display_frame, f"Frame: {frame_count}/{total_frames}", 
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            y_offset += 35
-            
-            cv2.putText(display_frame, f"People: {result.get('Total_people_detected', 0)}", 
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            y_offset += 35
-            
-            # Queue info
-            for i, queue_name in enumerate(result.get('Queue_Name', [])):
-                queue_len = result.get('Queue_Length', [0])[i]
-                queue_status = result.get('Status', ['OK'])[i]
-                status_color = (0, 255, 0) if queue_status == "OK" else (0, 0, 255)
-                
-                cv2.putText(display_frame, f"{queue_name}: {queue_len} [{queue_status}]",
-                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2)
-                y_offset += 30
-            
-            '''
+
+            # The customer count is now automatically added to the annotated frame
+            # No need to add it here anymore!
+
             cv2.imshow("Queue Monitoring - Local Test", display_frame)
 
-        
         # Handle keyboard input
         key = cv2.waitKey(1) & 0xFF
-        
+
         if key == ord('q'):
             print("\n✓ Quit requested")
             break
@@ -206,25 +235,77 @@ def main():
             print(f"  Screenshot saved: {screenshot_name}")
         elif key == ord('u'):
             print("  Force updating from database...")
-            camera_config = get_camera_config(CAMERA_ID, force_refresh=True)
+            new_config = get_camera_config(CAMERA_ID, force_refresh=True)
+            camera_config = convert_normalized_to_absolute_coords(new_config, frame_width, frame_height)
             print("  ✓ Config updated and cached to roi.json")
-    
+        elif key == ord('d'):
+            if last_result:
+                print("\n" + "=" * 70)
+                print("CURRENT STATISTICS")
+                print("=" * 70)
+                print(f"Total Customers Visited: {last_result.get('Total_Customer_Visited', 0)}")
+                print(f"Current People Detected: {last_result.get('Total_people_detected', 0)}")
+
+                queue_names = last_result.get('Queue_Name', [])
+                queue_customers = last_result.get('Queue_Customer_Visited', [])
+                queue_lengths = last_result.get('Queue_Length', [])
+
+                for i, queue_name in enumerate(queue_names):
+                    customers = queue_customers[i] if i < len(queue_customers) else 0
+                    length = queue_lengths[i] if i < len(queue_lengths) else 0
+                    print(f"\n{queue_name}:")
+                    print(f"  - Total Visited: {customers}")
+                    print(f"  - Current Length: {length}")
+
+                tracker_stats = last_result.get('Tracker_Stats', {})
+                if tracker_stats:
+                    print(f"\nTracker Stats:")
+                    print(f"  - Active Tracks: {tracker_stats.get('active_tracks', 0)}")
+                    print(f"  - Unique Persons: {tracker_stats.get('unique_persons', 0)}")
+                    print(f"  - Total IDs Created: {tracker_stats.get('total_tracks_created', 0)}")
+
+                print("=" * 70 + "\n")
+
     # Cleanup
     cap.release()
     cv2.destroyAllWindows()
-    
-    print("\n" + "=" * 70)
-    print(f"Processing complete: {frame_count} frames processed")
-    print("=" * 70)
+
+    # Final statistics
+    if last_result:
+        print("\n" + "=" * 70)
+        print("FINAL STATISTICS")
+        print("=" * 70)
+        print(f"Frames Processed: {frame_count}")
+        print(f"Total Unique Customers Visited: {last_result.get('Total_Customer_Visited', 0)}")
+
+        queue_names = last_result.get('Queue_Name', [])
+        queue_customers = last_result.get('Queue_Customer_Visited', [])
+
+        print("\nPer-Queue Statistics:")
+        for i, queue_name in enumerate(queue_names):
+            customers = queue_customers[i] if i < len(queue_customers) else 0
+            print(f"  {queue_name}: {customers} unique customers")
+
+        tracker_stats = last_result.get('Tracker_Stats', {})
+        if tracker_stats:
+            print(f"\nTracker Summary:")
+            print(f"  - Unique Persons Detected: {tracker_stats.get('unique_persons', 0)}")
+            print(f"  - Total Track IDs Generated: {tracker_stats.get('total_tracks_created', 0)}")
+
+        print("=" * 70)
+    else:
+        print("\n" + "=" * 70)
+        print(f"Processing complete: {frame_count} frames processed")
+        print("=" * 70)
 
 
 if __name__ == "__main__":
     import sys
-    
+
     # Allow video path as command line argument
     if len(sys.argv) > 1:
         VIDEO_PATH = sys.argv[1]
-    
+
     try:
         main()
     except KeyboardInterrupt:
