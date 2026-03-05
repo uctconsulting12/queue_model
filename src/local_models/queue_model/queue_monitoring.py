@@ -1030,11 +1030,13 @@ class QueueMonitoringSystem:
             except Exception as e:
                 logger.warning(f"Failed to add system info: {e}")
 
+            '''
             # Add customer count overlay to top-right corner
             try:
                 annotated = add_customer_count_overlay(annotated, self.total_customer_visited)
             except Exception as e:
                 logger.warning(f"Failed to add customer count overlay: {e}")
+            '''
 
             return annotated
 

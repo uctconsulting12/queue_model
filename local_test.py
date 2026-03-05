@@ -2,7 +2,7 @@
 """
 Local test file - Manages database fetching, roi.json caching, and inference
 Same invocation style as AWS version
-Enhanced with customer visit tracking display
+Enhanced with customer visit tracking display + Excel logging (batch writing)
 """
 
 import os
@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Import modules
-from src.local_models.queue_model.db_manager import get_camera_config, check_for_updates, sync_all_cameras, load_roi_cache
+from src.local_models.queue_model.db_manager import get_camera_config, check_for_updates, sync_all_cameras, \
+    load_roi_cache
 from src.local_models.queue_model.inference import model_fn, input_fn, predict_fn, output_fn
+from excel_logger import ExcelLogger, save_results  # ← Updated import
 
 # Configuration
 VIDEO_PATH = r"E:\UTC project\CCTV_Project\Video\Vid.mp4"  # Change this to your video path
@@ -44,7 +46,8 @@ def b64_to_frame(b64_str: str) -> np.ndarray:
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
 
-def convert_normalized_to_absolute_coords(camera_config: Dict[str, Any], frame_width: int, frame_height: int) -> Dict[str, Any]:
+def convert_normalized_to_absolute_coords(camera_config: Dict[str, Any], frame_width: int, frame_height: int) -> Dict[
+    str, Any]:
     """
     Convert normalized coordinates (0-1) to absolute pixel coordinates
 
@@ -83,6 +86,10 @@ def main():
     print("=" * 70)
     print("Queue Monitoring System - Local Test")
     print("=" * 70)
+
+    # Initialize Excel logger (in-memory, no disk writes yet)
+    excel_logger = ExcelLogger()
+    print("✓ Excel logger initialized (batch mode - results will be saved at the end)")
 
     # Step 1: Load YOLO model
     print("\n[1/4] Loading YOLO model...")
@@ -156,6 +163,7 @@ def main():
     last_update_check = time.time()
     paused = False
     last_result = None
+    start_time = time.time()
 
     while True:
         if not paused:
@@ -165,6 +173,12 @@ def main():
                 break
 
             frame_count += 1
+
+            # Progress indicator
+            if frame_count % 100 == 0:
+                elapsed = time.time() - start_time
+                fps_processing = frame_count / elapsed if elapsed > 0 else 0
+                print(f"  Processed {frame_count}/{total_frames} frames ({fps_processing:.1f} fps)")
 
             # Check for database updates periodically
             current_time = time.time()
@@ -202,6 +216,15 @@ def main():
                 result = json.loads(output_json)
                 last_result = result
 
+                # ── Add to Excel DataFrame (in-memory, no disk write) ──────────────────
+                try:
+                    # Remove annotated frame to save memory
+                    result_for_log = {k: v for k, v in result.items() if k != "Annotated_Frame"}
+                    excel_logger.add_result(result_for_log)
+                except Exception as excel_err:
+                    logger.warning(f"Excel logging failed for frame {frame_count}: {excel_err}")
+                # ─────────────────────────────────────────────────────────────────────
+
             except Exception as e:
                 logger.error(f"Inference failed: {e}")
                 import traceback
@@ -213,9 +236,6 @@ def main():
                 display_frame = b64_to_frame(result["Annotated_Frame"])
             else:
                 display_frame = frame
-
-            # The customer count is now automatically added to the annotated frame
-            # No need to add it here anymore!
 
             cv2.imshow("Queue Monitoring - Local Test", display_frame)
 
@@ -264,11 +284,25 @@ def main():
                     print(f"  - Unique Persons: {tracker_stats.get('unique_persons', 0)}")
                     print(f"  - Total IDs Created: {tracker_stats.get('total_tracks_created', 0)}")
 
+                # Show memory usage info
+                memory_rows = len(excel_logger.results_df)
+                print(f"\nExcel Buffer:")
+                print(f"  - Rows in memory: {memory_rows}")
+                print(f"  - (Will be saved on exit)")
+
                 print("=" * 70 + "\n")
 
     # Cleanup
     cap.release()
     cv2.destroyAllWindows()
+
+    # Final statistics and save Excel file
+    print("\n" + "=" * 70)
+    print("SAVING RESULTS TO EXCEL")
+    print("=" * 70)
+
+    # Save all accumulated results to Excel (single write operation)
+    excel_logger.save_to_excel()
 
     # Final statistics
     if last_result:
@@ -292,6 +326,13 @@ def main():
             print(f"  - Unique Persons Detected: {tracker_stats.get('unique_persons', 0)}")
             print(f"  - Total Track IDs Generated: {tracker_stats.get('total_tracks_created', 0)}")
 
+        processing_time = time.time() - start_time
+        avg_fps = frame_count / processing_time if processing_time > 0 else 0
+        print(f"\nPerformance:")
+        print(f"  - Total processing time: {processing_time:.2f} seconds")
+        print(f"  - Average processing FPS: {avg_fps:.2f}")
+        print(f"  - Excel write operations: 1 (instead of {frame_count})")
+
         print("=" * 70)
     else:
         print("\n" + "=" * 70)
@@ -310,7 +351,16 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n\n✓ Interrupted by user")
+        # Try to save results on interrupt
+        try:
+            from excel_logger import save_results
+
+            save_results()
+            print("✓ Results saved before exit")
+        except:
+            pass
     except Exception as e:
         print(f"\n✗ Error: {e}")
         import traceback
+
         traceback.print_exc()

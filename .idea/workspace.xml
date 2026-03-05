@@ -5,15 +5,9 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="0f2ec9db-afd3-4527-9f3b-7b6b76403a11" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/queue_model.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/queue_model.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/roi.json" beforeDir="false" afterPath="$PROJECT_DIR$/roi.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/database/queue_query.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/database/queue_query.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/local_models/queue_model/local_test.py" beforeDir="false" afterPath="$PROJECT_DIR$/local_test.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/local_test.py" beforeDir="false" afterPath="$PROJECT_DIR$/local_test.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/local_models/queue_model/queue_monitoring.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/local_models/queue_model/queue_monitoring.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/local_models/queue_model/roi.json" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -39,6 +33,7 @@
   &quot;keyToString&quot;: {
     &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.Check_DB_Local.executor&quot;: &quot;Run&quot;,
     &quot;Python.local_test.executor&quot;: &quot;Run&quot;,
     &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
